@@ -185,10 +185,10 @@ const hackScraper = new HackScraper();
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8756624614:AAF81fxfThFxhnsU7rlfTKZaKW7_M6caa3Y"
-const OWNER_ID     = 1865939951;
-const OWNER_PASS   = "praveensaran";
-const ADMIN_HANDLE = "@lucifer1570";
+const BOT_TOKEN    ="8692459169:AAHmpdQ3pcdmi0lPJzmHiw7N-H7l1QzP8kI";
+const OWNER_ID     = 8321379592;
+const OWNER_PASS   = "2004";
+const ADMIN_HANDLE = "@Sivakutty1";
 
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
