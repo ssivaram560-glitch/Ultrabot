@@ -29,123 +29,116 @@ class HackScraper {
             'https://fascinating-cocada-6074fc.netlify.app/'
         ];
         this.browser = null;
-        this.pages = [];
         this.predictions = new Map(); // url -> { period, size, number }
         this.isInitialized = false;
+        this.isUpdating = false;
     }
 
     async init() {
         if (this.isInitialized) return;
-        this.browser = await puppeteer.launch({
-            headless: true, 
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
-        });
-        
-        const setupPage = async (p) => {
-            await p.setDefaultNavigationTimeout(90000);
-            await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        };
-
-        console.log("[SCRAPER] Initializing 14 hack pages...");
-        for (const url of this.urls) {
-            try {
-                const page = await this.browser.newPage();
-                await page.setViewport({ width: 800, height: 600 });
-                
-                // Disable resource-heavy assets
-                await page.setRequestInterception(true);
-                page.on('request', (req) => {
-                    if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
-                        req.abort();
-                    } else {
-                        req.continue();
-                    }
-                });
-
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                this.pages.push({ url, page });
-                console.log(`[SCRAPER] Loaded: ${url}`);
-            } catch (e) {
-                console.error(`[SCRAPER] Failed to load ${url}: ${e.message}`);
-            }
+        try {
+            this.browser = await puppeteer.launch({
+                headless: true, 
+                args: [
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage', 
+                    '--disable-accelerated-2d-canvas', 
+                    '--no-first-run', 
+                    '--no-zygote', 
+                    '--single-process', 
+                    '--disable-gpu'
+                ]
+            });
+            this.isInitialized = true;
+            console.log("[SCRAPER] Browser launched. Memory-efficient mode active.");
+            this.startUpdateLoop();
+        } catch (e) {
+            console.error("[SCRAPER] Init failed:", e.message);
         }
-        this.isInitialized = true;
-        this.startUpdateLoop();
     }
-
 
     async startUpdateLoop() {
         setInterval(async () => {
-            await this.updateAll();
-        }, 15000); // Update every 15 seconds
+            if (!this.isUpdating) await this.updateAll();
+        }, 30000); // Update every 30 seconds to save resources
         await this.updateAll();
     }
 
     async updateAll() {
-        console.log("[SCRAPER] Updating predictions...");
-        const updates = this.pages.map(async ({ url, page }) => {
-            try {
-                // Perform site-specific interactions if needed
-                if (url.includes('endearing-brioche')) {
-                    await page.evaluate(() => {
-                        const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('1M'));
-                        if (btn) btn.click();
-                    }).catch(() => {});
-                }
-                if (url.includes('stirring-marzipan')) {
-                    await page.evaluate(() => {
-                        const btn = Array.from(document.querySelectorAll('button, div')).find(b => b.innerText.trim() === 'SCAN');
-                        if (btn) btn.click();
-                    }).catch(() => {});
-                }
-
-                const data = await page.evaluate(() => {
-                    const allText = document.body.innerText;
+        if (this.isUpdating) return;
+        this.isUpdating = true;
+        console.log("[SCRAPER] Updating predictions (sequential to save RAM)...");
+        
+        // Process URLs in small batches of 2 to balance speed and memory
+        const batchSize = 2;
+        for (let i = 0; i < this.urls.length; i += batchSize) {
+            const batch = this.urls.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (url) => {
+                let page = null;
+                try {
+                    page = await this.browser.newPage();
+                    await page.setDefaultNavigationTimeout(45000);
+                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                     
-                    // Find Period
-                    let period = null;
-                    const longMatches = allText.match(/\d{10,}/g);
-                    if (longMatches) period = longMatches.sort((a, b) => b.length - a.length)[0];
-                    else {
-                        const shortMatches = allText.match(/ROUND\s*·?\s*(\d+)/i) || allText.match(/PERIOD\s*·?\s*(\d+)/i);
-                        if (shortMatches) period = shortMatches[1];
+                    await page.setRequestInterception(true);
+                    page.on('request', (req) => {
+                        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+                            req.abort();
+                        } else {
+                            req.continue();
+                        }
+                    });
+
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 });
+
+                    if (url.includes('endearing-brioche')) {
+                        await page.evaluate(() => {
+                            const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('1M'));
+                            if (btn) btn.click();
+                        }).catch(() => {});
+                    }
+                    if (url.includes('stirring-marzipan')) {
+                        await page.evaluate(() => {
+                            const btn = Array.from(document.querySelectorAll('button, div')).find(b => b.innerText.trim() === 'SCAN');
+                            if (btn) btn.click();
+                        }).catch(() => {});
                     }
 
-                    // Find Size
-                    let size = null;
-                    const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
-                    for (const el of candidates) {
-                        const text = el.innerText.trim().toUpperCase();
-                        if (text === 'BIG' || text === 'SMALL') {
-                            const style = window.getComputedStyle(el);
-                            if (parseInt(style.fontSize) > 14) {
-                                size = text;
-                                break;
+                    const data = await page.evaluate(() => {
+                        const allText = document.body.innerText;
+                        let size = null;
+                        const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
+                        for (const el of candidates) {
+                            const text = el.innerText.trim().toUpperCase();
+                            if (text === 'BIG' || text === 'SMALL') {
+                                const style = window.getComputedStyle(el);
+                                if (parseInt(style.fontSize) > 12) {
+                                    size = text;
+                                    break;
+                                }
                             }
                         }
+                        let number = null;
+                        const balls = Array.from(document.querySelectorAll('.num-ball, .n-circle, .sig-ball, #n1, #n2, #sig-ball'));
+                        if (balls.length > 0) number = balls[0].innerText.trim().match(/\d/)?.[0];
+                        return { size, number };
+                    });
+
+                    if (data.size) {
+                        this.predictions.set(url, data);
                     }
-
-                    // Find Number
-                    let number = null;
-                    const balls = Array.from(document.querySelectorAll('.num-ball, .n-circle, .sig-ball, #n1, #n2, #sig-ball'));
-                    if (balls.length > 0) number = balls[0].innerText.trim().match(/\d/)?.[0];
-                    
-                    if (!number) {
-                        const digitMatches = allText.match(/Target\s*·?\s*(\d)/i) || allText.match(/NUM:\s*(\d)/i);
-                        if (digitMatches) number = digitMatches[1];
-                    }
-
-                    return { period, size, number };
-                });
-
-                if (data.size) {
-                    this.predictions.set(url, data);
+                } catch (e) {
+                    // console.log(`[SCRAPER] Failed ${url}: ${e.message}`);
+                } finally {
+                    if (page) await page.close().catch(() => {});
                 }
-            } catch (e) {
-                // Silently ignore individual page errors
-            }
-        });
-        await Promise.all(updates);
+            }));
+            // Small pause between batches
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        this.isUpdating = false;
+        console.log(`[SCRAPER] Update done. Cache size: ${this.predictions.size}`);
     }
 
     getAggregatedPrediction(targetPeriod) {
@@ -184,7 +177,6 @@ class HackScraper {
             totalVotes
         };
     }
-
 }
 
 const hackScraper = new HackScraper();
