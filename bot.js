@@ -1,4 +1,4 @@
-const TelegramBot = require('node-telegram-bot-api');
+ const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
 const zlib        = require('zlib');
@@ -591,14 +591,14 @@ function buildBSFromList(list, count = 15) {
 function initState(userId) {
     if (!userStates[userId]) {
         userStates[userId] = {
-            mode: "NORMAL",              // Always starts in Normal Mode
-            forcedModeQueue: [],         // For pattern predictions (RNRNRN / NRNRNR)
-            historyModes: [],            // History of completed modes
+            mode: "NORMAL",              
+            logicConsecutiveLoss: 0,     
+            historyModes: [],
             lastPredictionWasLoss: false
         };
     } else {
         if (!userStates[userId].historyModes) userStates[userId].historyModes = [];
-        if (!userStates[userId].forcedModeQueue) userStates[userId].forcedModeQueue = [];
+        if (userStates[userId].logicConsecutiveLoss === undefined) userStates[userId].logicConsecutiveLoss = 0;
         if (userStates[userId].mode === undefined) userStates[userId].mode = "NORMAL";
     }
 }
@@ -608,44 +608,47 @@ function decidePrediction(list, currentLevel, userId) {
     initState(userId);
     const state = userStates[userId];
     
-    // Pattern Detection - Trigger ONLY if last result was a LOSS
-    if (state.lastPredictionWasLoss) {
-        const patternStr = state.historyModes.join("");
-        if (patternStr.endsWith("NRNR")) {
-            // NRNR + Loss -> Trigger RNRNRN sequence
-            state.forcedModeQueue = ['R', 'N', 'R', 'N', 'R', 'N'];
-        } else if (patternStr.endsWith("RNRN")) {
-            // RNRN + Loss -> Trigger NRNRNR sequence
-            state.forcedModeQueue = ['N', 'R', 'N', 'R', 'N', 'R'];
+    const lastNum = parseInt(list[0].number || list[0].winNumber || 0);
+    const prevNum = parseInt(list[1].number || list[1].winNumber || 0);
+    const lastSize = lastNum >= 5 ? "BIG" : "SMALL";
+    const prevSize = prevNum >= 5 ? "BIG" : "SMALL";
+
+    let prediction;
+    let patternName = "";
+
+    // Logic Mode (Same/Opposite)
+    if (state.logicConsecutiveLoss < 3) {
+        if (lastSize === prevSize) {
+            prediction = lastSize; 
+            patternName = "SAME_LOGIC";
+        } else {
+            prediction = (lastSize === "BIG" ? "SMALL" : "BIG"); 
+            patternName = "OPP_LOGIC";
         }
+    } else {
+        // Math Mode Fallback (Normal/Recovery)
+        const currentPeriod = String(list[0].issueNumber);
+        const nextPeriodNum = BigInt(currentPeriod) + 1n;
+        const nextPeriod = nextPeriodNum.toString();
+        const nextLast3Num = parseInt(nextPeriod.slice(-3));
+        const answer = nextLast3Num * Math.exp(lastNum);
+        const answerStr = answer.toString();
+        const noDecimal = answerStr.replace('.', '');
+        const first14 = noDecimal.substring(0, 14);
+        const lastDigit = parseInt(first14.charAt(first14.length - 1));
+
+        const normalPrediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
+        const recoveryPrediction = lastDigit <= 4 ? 'BIG' : 'SMALL';
+        
+        prediction = (state.mode === "RECOVERY") ? recoveryPrediction : normalPrediction;
+        patternName = state.mode + "_MATH";
     }
-
-    let effectiveMode = state.mode;
-    if (state.forcedModeQueue && state.forcedModeQueue.length > 0) {
-        const nextChar = state.forcedModeQueue[0];
-        effectiveMode = (nextChar === "R") ? "RECOVERY" : "NORMAL";
-    }
-
-    const currentPeriod = String(list[0].issueNumber);
-    const currentResult = parseInt(list[0].number || list[0].winNumber || 0);
-    const nextPeriodNum = BigInt(currentPeriod) + 1n;
-    const nextPeriod = nextPeriodNum.toString();
-    const nextLast3Num = parseInt(nextPeriod.slice(-3));
-    const answer = nextLast3Num * Math.exp(currentResult);
-    const answerStr = answer.toString();
-    const noDecimal = answerStr.replace('.', '');
-    const first14 = noDecimal.substring(0, 14);
-    const lastDigit = parseInt(first14.charAt(first14.length - 1));
-
-    const normalPrediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
-    const recoveryPrediction = lastDigit <= 4 ? 'BIG' : 'SMALL';
-    const prediction = (effectiveMode === "RECOVERY") ? recoveryPrediction : normalPrediction;
 
     return {
         type: "SIZE",
         val: prediction,
         conf: 85,
-        pat: effectiveMode + (state.forcedModeQueue.length > 0 ? ` (Q:${state.forcedModeQueue.length})` : "")
+        pat: patternName + (state.logicConsecutiveLoss > 0 ? ` (L:${state.logicConsecutiveLoss})` : "")
     };
 }
 
@@ -653,27 +656,17 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initState(userId);
     const state = userStates[userId];
     
-    // Track which mode was just used
-    const usedModeChar = (state.forcedModeQueue && state.forcedModeQueue.length > 0) 
-        ? state.forcedModeQueue[0] 
-        : (state.mode === "NORMAL" ? "N" : "R");
-    
-    state.historyModes.push(usedModeChar);
-    if (state.historyModes.length > 20) state.historyModes.shift();
-
     state.lastPredictionWasLoss = !wasWin;
 
-    // Mode transition logic:
-    // - Start in Normal
-    // - Loss -> Toggle (Normal <-> Recovery)
-    // - Win -> Maintain current mode
-    if (!wasWin) {
-        state.mode = (state.mode === "NORMAL") ? "RECOVERY" : "NORMAL";
-    }
-
-    // Advance forced queue if active
-    if (state.forcedModeQueue && state.forcedModeQueue.length > 0) {
-        state.forcedModeQueue.shift();
+    if (wasWin) {
+        // Any win resets the bot to Logic Mode and resets Math mode to NORMAL
+        state.logicConsecutiveLoss = 0; 
+        state.mode = "NORMAL"; 
+    } else {
+        state.logicConsecutiveLoss++; 
+        // Loss triggers toggle for Math mode
+        if (state.mode === "NORMAL") state.mode = "RECOVERY";
+        else state.mode = "NORMAL";
     }
 
     if (typeof autobetState !== 'undefined' && autobetState[userId]) {
@@ -701,7 +694,7 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
 function getStatus(userId) {
     initState(userId);
     const state = userStates[userId];
-    return state.mode;
+    return state.mode + (state.logicConsecutiveLoss >= 3 ? " (MATH)" : " (LOGIC)");
 }
 
 
