@@ -1039,7 +1039,9 @@ function getLevelRequirement(level) {
 
 function decidePrediction(targetPeriod, userId) {
     const pred = hackScraper.getAggregatedPrediction(targetPeriod);
-    const cacheSize = hackScraper.predictions.size;
+    const scrapedCount = hackScraper.scrapedPredictions.size;
+    const virtualCount = hackScraper.virtualPredictions.size;
+    const totalSites = scrapedCount > 0 ? scrapedCount : virtualCount;
     
     if (!pred) {
         return {
@@ -1048,15 +1050,15 @@ function decidePrediction(targetPeriod, userId) {
             skip: true,
             conf: 0,
             pat: "HACK_SCRAPER",
-            reason: `No votes (Cache: ${cacheSize} sites, Period: ${targetPeriod.slice(-4)})`
+            reason: `No votes (Scraped: ${scrapedCount}, Virtual: ${virtualCount})`
         };
     }
     return {
         type: "SIZE",
         val: pred.size,
         conf: pred.confidence,
-        pat: "HACK_SCRAPER_VOTE",
-        reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes}/${cacheSize} sites)`
+        pat: scrapedCount > 0 ? "HACK_SCRAPER_LIVE" : "HACK_SCRAPER_VIRTUAL",
+        reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes}/${totalSites} sites)`
     };
 }
 
