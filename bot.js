@@ -767,21 +767,17 @@ function showStats(chatId, userId) {
         levelWinsStr = sortedLevels.map(lvl => `L${lvl}:${state.levelWins[lvl]}`).join("  ");
     }
 
-    send(chatId, "📊 STATS
-
-Total: " + d.total + "
-Wins: " + d.win + "
-Losses: " + d.loss + "
-Acc: " + rate + "%
-" + bar + 
-        "
-
-" + (levelWinsStr ? "🏆 Level Wins:
-" + levelWinsStr + "
-
-" : "") +
-        "Best Win: " + d.maxWinStreak + " streak
-Worst Loss: " + d.maxLossStreak + " streak");
+    let msg = "📊 STATS\n\n";
+    msg += "Total: " + d.total + "\n";
+    msg += "Wins: " + d.win + "\n";
+    msg += "Losses: " + d.loss + "\n";
+    msg += "Acc: " + rate + "%\n" + bar + "\n\n";
+    if (levelWinsStr) {
+        msg += "🏆 Level Wins:\n" + levelWinsStr + "\n\n";
+    }
+    msg += "Best Win: " + d.maxWinStreak + " streak\nWorst Loss: " + d.maxLossStreak + " streak";
+    
+    send(chatId, msg);
 }
 
 async function handleWin(userId, chatId, actual, num, betLevel) {
