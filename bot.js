@@ -633,9 +633,11 @@ function decidePrediction(list, currentLevel, userId) {
         state.consecutivePatternLoss = 0; // ரீசெட் பண்றோம்
         state.historyModes = []; // ஹிஸ்டரியை கிளியர் பண்றோம்
     } else if (patternStr.endsWith("NRNR")) {
+        state.forcedModeQueue = ['R', 'N', 'R', 'N', 'R', 'N']; // rnrnrn sequence
         effectiveMode = "RECOVERY"; 
         state.mode = "RECOVERY";
     } else if (patternStr.endsWith("RNRN")) {
+        state.forcedModeQueue = ['N', 'R', 'N', 'R', 'N', 'R']; // nrnrnr sequence
         effectiveMode = "NORMAL";   
         state.mode = "NORMAL";
     } else if (state.lastPredictionWasLoss) {
