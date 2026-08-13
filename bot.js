@@ -68,9 +68,9 @@ class HackScraper {
     async updateAll() {
         if (this.isUpdating) return;
         this.isUpdating = true;
-        console.log("[SCRAPER] Updating predictions (sequential to save RAM)...");
+        console.log("--------------------------------------------------");
+        console.log("[SCRAPER] Starting Batch Update...");
         
-        // Process URLs in small batches of 2 to balance speed and memory
         const batchSize = 2;
         for (let i = 0; i < this.urls.length; i += batchSize) {
             const batch = this.urls.slice(i, i + batchSize);
@@ -127,19 +127,28 @@ class HackScraper {
 
                     if (data.size) {
                         this.predictions.set(url, data);
+                        console.log(`[LINK DATA] URL: ${url.split('.')[0].split('//')[1]} -> Prediction: ${data.size}`);
+                    } else {
+                        console.log(`[LINK DATA] URL: ${url.split('.')[0].split('//')[1]} -> No Data Found`);
                     }
                 } catch (e) {
-                    // console.log(`[SCRAPER] Failed ${url}: ${e.message}`);
+                    console.log(`[LINK ERROR] URL: ${url.split('.')[0].split('//')[1]} -> Error: ${e.message.substring(0, 30)}`);
                 } finally {
                     if (page) await page.close().catch(() => {});
                 }
             }));
-            // Small pause between batches
             await new Promise(r => setTimeout(r, 1000));
         }
+        
+        // Log Aggregated result immediately after update
+        const final = this.getAggregatedPrediction();
+        if (final) {
+            console.log(`[FINAL VOTE] Majority: ${final.size} | Confidence: ${final.confidence}% | Total Sites: ${final.totalVotes}`);
+        }
+        console.log("--------------------------------------------------");
         this.isUpdating = false;
-        console.log(`[SCRAPER] Update done. Cache size: ${this.predictions.size}`);
     }
+
 
     getAggregatedPrediction(targetPeriod) {
         const votes = { BIG: 0, SMALL: 0 };
