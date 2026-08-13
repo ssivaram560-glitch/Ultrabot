@@ -154,8 +154,6 @@ class HackScraper {
         let totalVotes = 0;
 
         for (const [url, data] of this.predictions.entries()) {
-            // Aggregating latest predictions from all sites without strict period matching
-            // to prevent 'skip' issues caused by period mismatch.
             if (data && data.size) {
                 const s = data.size.toUpperCase();
                 if (s === 'BIG') { votes.BIG++; totalVotes++; }
@@ -1084,6 +1082,20 @@ function decidePrediction(targetPeriod, userId) {
         pat: "HACK_SCRAPER_VOTE",
         reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes}/${cacheSize} sites)`
     };
+}
+
+
+function updatePatternMemory(userId, history, wasWin) {
+    if (!userStates[userId]) return;
+    if (!userStates[userId].patternStats) userStates[userId].patternStats = {};
+    const pattern = history.slice(-4).join('');
+    if (pattern.length === 4) {
+        if (!userStates[userId].patternStats[pattern]) {
+            userStates[userId].patternStats[pattern] = { win: 0, loss: 0 };
+        }
+        if (wasWin) userStates[userId].patternStats[pattern].win++;
+        else userStates[userId].patternStats[pattern].loss++;
+    }
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced, betLevel) {
