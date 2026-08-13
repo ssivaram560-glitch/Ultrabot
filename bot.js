@@ -71,7 +71,8 @@ class HackScraper {
         if (this.isUpdating) return;
         this.isUpdating = true;
         
-        for (let i = 0; i < this.urls.length; i++) {
+        const batchSize = 2;
+        for (let i = 0; i < this.urls.length; i += batchSize) {
             if (this.currentPeriod !== targetPeriod) break;
             
             // Deadline checks: 35s elapsed OR 15s left in period
@@ -84,7 +85,8 @@ class HackScraper {
                 break;
             }
 
-            const url = this.urls[i];
+            const batch = this.urls.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (url) => {
             const siteName = url.split('.')[0].split('//')[1].substring(0, 10);
             let page = null;
             try {
@@ -1347,7 +1349,7 @@ async function runPredict(userId, chatId) {
     if(!list) return setTimeout(()=>runPredict(userId,chatId), 15000);
 
     const next = (BigInt(list[0].issueNumber)+1n).toString();
-    if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 2000);
+    if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 1000);
     sentPeriods[userId].add(next);
 
     // --- LIVE ANALYSIS WAIT LOGIC ---
@@ -1466,7 +1468,7 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
         if (++tries > 25) {
             clearInterval(iv);
             await logBoth(chatId, "⏱ Timeout — checking next period...");
-            setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 3000);
+            setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 1000);
             return;
         }
         const list = await fetchList(); if (!list) return;
@@ -1554,7 +1556,7 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
             }
         }
 
-        setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 8000);
+        setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 1000);
     }, 10000);
 }
 
