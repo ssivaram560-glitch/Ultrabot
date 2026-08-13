@@ -29,7 +29,7 @@ class HackScraper {
             'https://fascinating-cocada-6074fc.netlify.app/'
         ];
         this.browser = null;
-        this.predictions = new Map(); // url -> { period, size, number }
+        this.predictions = new Map();
         this.isInitialized = false;
         this.isUpdating = false;
     }
@@ -40,18 +40,13 @@ class HackScraper {
             this.browser = await puppeteer.launch({
                 headless: true, 
                 args: [
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox', 
-                    '--disable-dev-shm-usage', 
-                    '--disable-accelerated-2d-canvas', 
-                    '--no-first-run', 
-                    '--no-zygote', 
-                    '--single-process', 
-                    '--disable-gpu'
+                    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
+                    '--single-process', '--disable-gpu'
                 ]
             });
             this.isInitialized = true;
-            console.log("[SCRAPER] Browser launched. Memory-efficient mode active.");
+            console.log("[SCRAPER] Browser initialized. Sequential thorough mode active.");
             this.startUpdateLoop();
         } catch (e) {
             console.error("[SCRAPER] Init failed:", e.message);
@@ -59,9 +54,10 @@ class HackScraper {
     }
 
     async startUpdateLoop() {
+        // Run update loop every 50 seconds to align with 1-min game cycle
         setInterval(async () => {
             if (!this.isUpdating) await this.updateAll();
-        }, 30000); // Update every 30 seconds to save resources
+        }, 50000);
         await this.updateAll();
     }
 
@@ -69,86 +65,90 @@ class HackScraper {
         if (this.isUpdating) return;
         this.isUpdating = true;
         console.log("--------------------------------------------------");
-        console.log("[SCRAPER] Starting Batch Update...");
+        console.log("[SCRAPER] Starting Sequential Thorough Update...");
         
-        const batchSize = 2;
-        for (let i = 0; i < this.urls.length; i += batchSize) {
-            const batch = this.urls.slice(i, i + batchSize);
-            await Promise.all(batch.map(async (url) => {
-                let page = null;
-                try {
-                    page = await this.browser.newPage();
-                    await page.setDefaultNavigationTimeout(45000);
-                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                    
-                    await page.setRequestInterception(true);
-                    page.on('request', (req) => {
-                        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-                            req.abort();
-                        } else {
-                            req.continue();
-                        }
-                    });
+        for (const url of this.urls) {
+            let page = null;
+            const siteName = url.split('.')[0].split('//')[1];
+            try {
+                page = await this.browser.newPage();
+                await page.setDefaultNavigationTimeout(60000);
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                
+                await page.setRequestInterception(true);
+                page.on('request', (req) => {
+                    if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
+                    else req.continue();
+                });
 
-                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 });
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 50000 });
 
-                    if (url.includes('endearing-brioche')) {
-                        await page.evaluate(() => {
-                            const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('1M'));
-                            if (btn) btn.click();
-                        }).catch(() => {});
-                    }
-                    if (url.includes('stirring-marzipan')) {
-                        await page.evaluate(() => {
-                            const btn = Array.from(document.querySelectorAll('button, div')).find(b => b.innerText.trim() === 'SCAN');
-                            if (btn) btn.click();
-                        }).catch(() => {});
-                    }
+                // Perform interactions
+                if (url.includes('endearing-brioche')) {
+                    await page.evaluate(() => {
+                        const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('1M'));
+                        if (btn) btn.click();
+                    }).catch(() => {});
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+                
+                if (url.includes('stirring-marzipan')) {
+                    await page.evaluate(() => {
+                        const btn = Array.from(document.querySelectorAll('button, div')).find(b => b.innerText.trim() === 'SCAN');
+                        if (btn) btn.click();
+                    }).catch(() => {});
+                }
 
-                    const data = await page.evaluate(() => {
-                        const allText = document.body.innerText;
+                // Wait for the prediction to appear (Polling inside evaluate)
+                const data = await page.evaluate(async () => {
+                    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                    for (let i = 0; i < 15; i++) { // Wait up to 15 seconds
+                        const allText = document.body.innerText.toUpperCase();
                         let size = null;
                         const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
                         for (const el of candidates) {
                             const text = el.innerText.trim().toUpperCase();
                             if (text === 'BIG' || text === 'SMALL') {
                                 const style = window.getComputedStyle(el);
-                                if (parseInt(style.fontSize) > 12) {
+                                if (parseInt(style.fontSize) > 10) {
                                     size = text;
                                     break;
                                 }
                             }
                         }
-                        let number = null;
-                        const balls = Array.from(document.querySelectorAll('.num-ball, .n-circle, .sig-ball, #n1, #n2, #sig-ball'));
-                        if (balls.length > 0) number = balls[0].innerText.trim().match(/\d/)?.[0];
-                        return { size, number };
-                    });
-
-                    if (data.size) {
-                        this.predictions.set(url, data);
-                        console.log(`[LINK DATA] URL: ${url.split('.')[0].split('//')[1]} -> Prediction: ${data.size}`);
-                    } else {
-                        console.log(`[LINK DATA] URL: ${url.split('.')[0].split('//')[1]} -> No Data Found`);
+                        if (size) {
+                            let number = null;
+                            const balls = Array.from(document.querySelectorAll('.num-ball, .n-circle, .sig-ball, #n1, #n2, #sig-ball'));
+                            if (balls.length > 0) number = balls[0].innerText.trim().match(/\d/)?.[0];
+                            return { size, number };
+                        }
+                        await wait(1000);
                     }
-                } catch (e) {
-                    console.log(`[LINK ERROR] URL: ${url.split('.')[0].split('//')[1]} -> Error: ${e.message.substring(0, 30)}`);
-                } finally {
-                    if (page) await page.close().catch(() => {});
+                    return { size: null, number: null };
+                });
+
+                if (data.size) {
+                    this.predictions.set(url, data);
+                    console.log(`[LINK DATA] ${siteName} -> Prediction: ${data.size}`);
+                } else {
+                    console.log(`[LINK DATA] ${siteName} -> No Data Found (Timeout)`);
                 }
-            }));
-            await new Promise(r => setTimeout(r, 1000));
+            } catch (e) {
+                console.log(`[LINK ERROR] ${siteName} -> ${e.message.substring(0, 30)}`);
+            } finally {
+                if (page) await page.close().catch(() => {});
+            }
+            // Small gap between sites to keep RAM low
+            await new Promise(r => setTimeout(r, 500));
         }
         
-        // Log Aggregated result immediately after update
         const final = this.getAggregatedPrediction();
         if (final) {
-            console.log(`[FINAL VOTE] Majority: ${final.size} | Confidence: ${final.confidence}% | Total Sites: ${final.totalVotes}`);
+            console.log(`[FINAL VOTE] Majority: ${final.size} | Conf: ${final.confidence}% | Sites: ${final.totalVotes}/${this.urls.length}`);
         }
         console.log("--------------------------------------------------");
         this.isUpdating = false;
     }
-
 
     getAggregatedPrediction(targetPeriod) {
         const votes = { BIG: 0, SMALL: 0 };
