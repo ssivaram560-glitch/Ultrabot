@@ -78,42 +78,70 @@ class HackScraper {
         }
     }
 
+    /**
+     * @method runEngine
+     * @description Intha method thaan 14 different mathematical formulas-ah execute pannum.
+     */
     runEngine(id, sizes, numbers, nextIssue) {
-        // Logic A: Boss Bhai style (Micro/Macro)
+        
+        // --- TYPE 1: STREAK REVERSAL LOGIC (Engines 1 to 4) ---
+        // Ithu 'Boss Bhai' hack site-oda formula. 
+        // Logic: Orey result (BIG/SMALL) thodarchiya vanthitta, aduthu 'Reversal' (change) aagum nu predict pannum.
         if (id <= 4) {
             let streak = 1;
             for (let i = 0; i < sizes.length - 1; i++) {
                 if (sizes[i] === sizes[i+1]) streak++; else break;
             }
             let res = sizes[0];
-            if (streak >= (id + 1)) res = (sizes[0] === "BIG" ? "SMALL" : "BIG");
+            // Ovvoru engine-um ovvoru streak length-ah check pannum (e.g., Engine 1 checks 2-streak, Engine 4 checks 5-streak)
+            if (streak >= (id + 1)) {
+                res = (sizes[0] === "BIG" ? "SMALL" : "BIG"); // Reversal
+            }
             return { size: res, number: (res === "BIG" ? 7 : 2) };
         }
         
-        // Logic B: Draco Elite style (Pattern Match + Math)
+        // --- TYPE 2: PATTERN MATCHING & HYPER MATH (Engines 5 to 9) ---
+        // Ithu 'Draco Elite' hack site-oda formula.
+        // Logic: History-la irukkura sequences-ah pre-defined patterns kooda match pannum.
         if (id <= 9) {
             const patterns = ["BSBSBS", "BBSSBBSS", "BBBSSS", "BSSBSS", "BBBSBBBS"];
-            const seq = sizes.slice(0, 6).map(s => s[0]).join('');
+            const seq = sizes.slice(0, 6).map(s => s[0]).join(''); // Last 6 rounds sequence
+            
             for (let p of patterns) {
                 let idx = p.indexOf(seq);
                 if (idx !== -1 && idx + seq.length < p.length) {
+                    // Pattern match aana, adutha character-ah prediction-ah edukkum
                     let res = p[idx + seq.length] === 'B' ? 'BIG' : 'SMALL';
                     return { size: res, number: (res === "BIG" ? 8 : 3) };
                 }
             }
-            // Math Fallback
+
+            // HYPER MATH FALLBACK: 
+            // Pattern match aagala na, intha formula use aagum:
+            // (Last Number + Next Period's Last Digit + Engine ID) % 10
             let mathVal = (numbers[0] + parseInt(nextIssue.slice(-1)) + id) % 10;
             let res = mathVal >= 5 ? "BIG" : "SMALL";
             return { size: res, number: mathVal };
         }
 
-        // Logic C: Pattern DB style
+        // --- TYPE 3: PATTERN DATABASE & PARITY (Engines 10 to 14) ---
+        // Ithu 'Friendship Day' site-oda formula.
+        // Logic: Chinna 3-round patterns-ah check pannum.
         const db = {
             "SSB": "BIG", "BSB": "SMALL", "BBS": "BIG", "SBB": "SMALL",
-            "SSS": "BIG", "BBB": "SMALL", "SBS": "BIG", "BSB": "SMALL"
+            "SSS": "BIG", "BBB": "SMALL", "SBS": "BIG", "BSS": "SMALL"
         };
-        const seq3 = sizes.slice(0, 3).map(s => s[0]).join('');
-        let res = db[seq3] || (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
+        const seq3 = sizes.slice(0, 3).map(s => s[0]).join(''); // Last 3 rounds
+        
+        let res;
+        if (db[seq3]) {
+            res = db[seq3];
+        } else {
+            // PARITY FALLBACK: 
+            // Last number 'Even' ah irunda BIG, 'Odd' ah irunda SMALL (Standard probability logic)
+            res = (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
+        }
+        
         return { size: res, number: (res === "BIG" ? 6 : 1) };
     }
 
