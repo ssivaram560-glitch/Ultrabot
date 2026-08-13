@@ -594,12 +594,18 @@ function initState(userId) {
             mode: "NORMAL",              
             logicConsecutiveLoss: 0,     
             historyModes: [],
-            lastPredictionWasLoss: false
+            lastPredictionWasLoss: false,
+            skipPeriods: 0,
+            waitingForRecovery: false,
+            levelWins: {} 
         };
     } else {
         if (!userStates[userId].historyModes) userStates[userId].historyModes = [];
         if (userStates[userId].logicConsecutiveLoss === undefined) userStates[userId].logicConsecutiveLoss = 0;
         if (userStates[userId].mode === undefined) userStates[userId].mode = "NORMAL";
+        if (userStates[userId].skipPeriods === undefined) userStates[userId].skipPeriods = 0;
+        if (userStates[userId].waitingForRecovery === undefined) userStates[userId].waitingForRecovery = false;
+        if (userStates[userId].levelWins === undefined) userStates[userId].levelWins = {};
     }
 }
 
@@ -615,9 +621,12 @@ function decidePrediction(list, currentLevel, userId) {
 
     let prediction;
     let patternName = "";
+    let shouldBet = true;
+    let baseMode = "";
 
-    // 1. Logic Mode (Same/Opposite) - Active for first 3 levels
-    if (state.logicConsecutiveLoss < 3) {
+    // Determine Base Logic/Mode
+    if (currentLevel <= 3) {
+        baseMode = "LOGIC";
         if (lastSize === prevSize) {
             prediction = lastSize; 
             patternName = "SAME_LOGIC";
@@ -626,10 +635,7 @@ function decidePrediction(list, currentLevel, userId) {
             patternName = "OPP_LOGIC";
         }
     } else {
-        // 2. Math Mode / Special Level Rules (L4 and above)
-        // Note: state.logicConsecutiveLoss >= 3 means we are at L4 or higher.
-        
-        // Prepare Math Predictions
+        // Math/Special Rules
         const currentPeriod = String(list[0].issueNumber);
         const nextPeriodNum = BigInt(currentPeriod) + 1n;
         const nextPeriod = nextPeriodNum.toString();
@@ -644,37 +650,35 @@ function decidePrediction(list, currentLevel, userId) {
         const recoveryPred = lastDigit <= 4 ? 'BIG' : 'SMALL';
         const oppositePred = (lastSize === "BIG" ? "SMALL" : "BIG");
 
-        // Apply Level Specific Rules
         if (currentLevel === 4) {
+            baseMode = "NORMAL";
             prediction = normalPred;
             patternName = "L4_NORMAL_MATH";
         } 
-        else if (currentLevel === 5 || currentLevel === 7 || currentLevel === 8) {
-            // Check latest 5 for BSBSB/SBSBS
-            let last5 = "";
-            if (list.length >= 5) {
-                for(let i=0; i<5; i++) {
-                    const n = parseInt(list[i].number || list[i].winNumber || 0);
-                    last5 += (n >= 5 ? "B" : "S");
-                }
-            }
-            // Pattern check (though rule says OPPOSITE in both cases)
-            if (last5 === "BSBSB" || last5 === "SBSBS") {
-                prediction = oppositePred;
-                patternName = `L${currentLevel}_PATTERN_OPP`;
-            } else {
-                prediction = oppositePred;
-                patternName = `L${currentLevel}_TREND_OPP`;
-            }
+        else if (currentLevel === 5) {
+            baseMode = "OPPOSITE";
+            prediction = oppositePred;
+            patternName = "L5_OPPOSITE";
         }
-        else if (currentLevel === 6) {
+        else if (currentLevel >= 6) {
+            // L6, L7, L8, L9, L10 are all RECOVERY
+            baseMode = "RECOVERY";
             prediction = recoveryPred;
-            patternName = "L6_RECOVERY_MATH";
+            patternName = `L${currentLevel}_RECOVERY`;
         }
-        else {
-            // Default for L9+
-            prediction = normalPred;
-            patternName = `L${currentLevel}_DEFAULT_MATH`;
+    }
+
+    // Handle Skip and Waiting Logic
+    if (state.skipPeriods > 0) {
+        shouldBet = false;
+        patternName = `SKIP (${state.skipPeriods})`;
+    } else if (state.waitingForRecovery) {
+        if (baseMode === "RECOVERY") {
+            shouldBet = true;
+            patternName = `L${currentLevel}_ENTRY_REC`;
+        } else {
+            shouldBet = false;
+            patternName = `WAIT_REC (L${currentLevel})`;
         }
     }
 
@@ -682,58 +686,104 @@ function decidePrediction(list, currentLevel, userId) {
         type: "SIZE",
         val: prediction,
         conf: 85,
-        pat: patternName + (state.logicConsecutiveLoss > 0 ? ` (L:${state.logicConsecutiveLoss})` : "")
+        pat: patternName,
+        shouldBet: shouldBet
     };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initState(userId);
     const state = userStates[userId];
+    const st = autobetState[userId];
+    const cfg = autobetCfg[userId];
+    
+    // If skipping, decrement
+    if (state.skipPeriods > 0) {
+        state.skipPeriods--;
+        if (state.skipPeriods === 0) {
+            state.waitingForRecovery = true;
+        }
+        // Don't advance level during skip, it's handled by L6 loss trigger
+        return;
+    }
+
+    // If waiting for recovery and no bet was placed, just return
+    if (state.waitingForRecovery && !betPlaced) {
+        return;
+    }
+
     state.lastPredictionWasLoss = !wasWin;
 
     if (wasWin) {
-        // Any win resets to Logic Mode
-        state.logicConsecutiveLoss = 0; 
-        state.mode = "NORMAL"; 
+        // Record win for level
+        const winLvl = st.level;
+        state.levelWins[winLvl] = (state.levelWins[winLvl] || 0) + 1;
+        
+        // Reset to L1
+        state.logicConsecutiveLoss = 0;
+        state.mode = "NORMAL";
+        state.waitingForRecovery = false;
+        st.level = 1;
+        st.consecutiveLoss = 0;
     } else {
-        state.logicConsecutiveLoss++; 
-        // Maintain math toggle logic for state tracking
-        if (state.mode === "NORMAL") state.mode = "RECOVERY";
-        else state.mode = "NORMAL";
-    }
-
-    if (typeof autobetState !== 'undefined' && autobetState[userId]) {
-        const st = autobetState[userId];
-        const cfg = autobetCfg[userId];
-        if (betPlaced) {
-            if (wasWin) {
+        // Loss handling
+        if (st.level === 6) {
+            state.skipPeriods = 6;
+            st.level = 7;
+            state.waitingForRecovery = false; // Will be set true after 6 skips
+        } else if (st.level >= 7) {
+            st.level++;
+            state.waitingForRecovery = true; // Wait for next recovery for L8, L9, L10
+            if (st.level > cfg.maxLvl) {
                 st.level = 1;
-                st.consecutiveLoss = 0;
-            } else {
-                st.consecutiveLoss++;
-                st.level++;
-                if (st.level > cfg.maxLvl) {
-                    st.level = 1;
-                    st.consecutiveLoss = 0;
-                }
+                state.waitingForRecovery = false;
             }
-        } else if (cfg && cfg.watch) {
-            if (wasWin) st.consecutiveLoss = 0;
-            else st.consecutiveLoss++;
+        } else {
+            st.level++;
+            state.logicConsecutiveLoss++;
         }
+        st.consecutiveLoss++;
     }
 }
 
 function getStatus(userId) {
     initState(userId);
     const state = userStates[userId];
-    let modeDesc = (state.logicConsecutiveLoss < 3) ? "LOGIC" : "MATH";
-    return `${modeDesc} (L${state.logicConsecutiveLoss + 1})`;
+    const st = autobetState[userId];
+    if (state.skipPeriods > 0) return `SKIPPING (${state.skipPeriods})`;
+    if (state.waitingForRecovery) return `WAITING REC (L${st.level})`;
+    return `ACTIVE (L${st.level})`;
 }
 
+function showStats(chatId, userId) {
+    initUser(userId);
+    const state = userStates[userId];
+    const d = stats[userId], rate = d.total ? ((d.win / d.total) * 100).toFixed(1) : "0.0";
+    const bar = "🟦".repeat(d.total ? Math.round(d.win / d.total * 10) : 0) + "⬜".repeat(d.total ? 10 - Math.round(d.win / d.total * 10) : 10);
+    
+    let levelWinsStr = "";
+    if (state.levelWins) {
+        const sortedLevels = Object.keys(state.levelWins).sort((a, b) => a - b);
+        levelWinsStr = sortedLevels.map(lvl => `L${lvl}:${state.levelWins[lvl]}`).join("  ");
+    }
 
-// 2. handleWin - UI & Stats
-// ============================================================
+    send(chatId, "📊 STATS
+
+Total: " + d.total + "
+Wins: " + d.win + "
+Losses: " + d.loss + "
+Acc: " + rate + "%
+" + bar + 
+        "
+
+" + (levelWinsStr ? "🏆 Level Wins:
+" + levelWinsStr + "
+
+" : "") +
+        "Best Win: " + d.maxWinStreak + " streak
+Worst Loss: " + d.maxLossStreak + " streak");
+}
+
 async function handleWin(userId, chatId, actual, num, betLevel) {
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
@@ -848,8 +898,11 @@ async function runPredict(userId, chatId) {
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
 
-    if (!cfg || !cfg.enabled) {
+        if (!cfg || !cfg.enabled) {
         abLine = "🤖 AutoBet: OFF";
+        canBet = false;
+    } else if (!signal.shouldBet) {
+        abLine = "⏳ WAITING / SKIPPING";
         canBet = false;
     } else if (cfg.watch && st.consecutiveLoss < cfg.watchLoss) {
         abLine = `👀 WATCHING: ${st.consecutiveLoss}/${cfg.watchLoss}`;
@@ -975,11 +1028,7 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
 
 module.exports = { decidePrediction, updateAfterResult, getStatus, initState, buildBSFromList, runPredict, checkResult };
 
-function showStats(chatId,userId){
-    const d=stats[userId],rate=d.total?((d.win/d.total)*100).toFixed(1):"0.0";
-    const bar="🟦".repeat(d.total?Math.round(d.win/d.total*10):0)+"⬜".repeat(d.total?10-Math.round(d.win/d.total*10):10);
-    send(chatId,"📊 STATS\n\nTotal: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nAcc: "+rate+"%\n"+bar+"\n\nBest Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak");
-}
+
 async function profitReport(chatId,userId){
     initUser(userId);
     const pt=profitTrack[userId],cfg=autobetCfg[userId];
