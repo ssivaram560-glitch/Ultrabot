@@ -12,162 +12,153 @@ const fs          = require('fs');
 
 class HackScraper {
     constructor() {
-        this.predictions = new Map();
+        this.urls = [
+            'https://stirring-marzipan-efab87.netlify.app/',
+            'https://eloquent-sawine-3276d9.netlify.app/',
+            'https://endearing-brioche-8b3530.netlify.app/',
+            'https://jolly-puppy-e6955d.netlify.app/',
+            'https://aesthetic-licorice-905d7b.netlify.app/',
+            'https://effortless-unicorn-557bf7.netlify.app/',
+            'https://cute-figolla-29e58e.netlify.app/',
+            'https://regal-brioche-62607e.netlify.app/',
+            'https://guileless-belekoy-d9b4bd.netlify.app/',
+            'https://lucent-pika-1b2271.netlify.app/',
+            'https://helpful-travesseiro-413d99.netlify.app/',
+            'https://fascinating-cocada-6074fc.netlify.app/'
+        ];
+        this.browser = null;
+        this.scrapedPredictions = new Map();
+        this.virtualPredictions = new Map();
         this.isUpdating = false;
         this.lastProcessedIssue = "";
     }
 
     async init() {
-        console.log("[SCRAPER] Virtual Engine Mode Active. No browser needed!");
-        // Start the virtual update loop
-        this.startUpdateLoop();
+        try {
+            this.browser = await puppeteer.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--disable-gpu']
+            });
+            console.log("[SCRAPER] Hybrid Engine Active (Browser + Virtual Fallback).");
+            this.startUpdateLoop();
+        } catch (e) {
+            console.error("[SCRAPER] Browser Init Failed:", e.message);
+        }
     }
 
     async startUpdateLoop() {
         setInterval(async () => {
             if (!this.isUpdating) await this.updateAll();
-        }, 5000); // Check every 5 seconds (very fast)
+        }, 45000);
         await this.updateAll();
     }
 
     async updateAll() {
         if (this.isUpdating) return;
         this.isUpdating = true;
+        console.log("[SCRAPER] Starting Hybrid Update Cycle...");
 
         try {
-            // Get history from the global bot instance (we need access to api)
-            // In this specific code structure, we can just fetch it fresh
-            const res = await axios.get(`https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?t=${Date.now()}`);
+            const res = await axios.get("https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?t=" + Date.now());
             const data = res.data;
-            if (!data || !data.data || !data.data.list) throw new Error("No history data");
+            if (!data || !data.data || !data.data.list) throw new Error("No history");
 
             const list = data.data.list;
             const latest = list[0];
             const issue = latest.issueNumber;
             const nextIssue = (BigInt(issue) + 1n).toString();
 
-            if (this.lastProcessedIssue === issue) {
-                this.isUpdating = false;
-                return;
-            }
-
-            console.log("--------------------------------------------------");
-            console.log(`[VIRTUAL ENGINE] Analyzing Next Period: ${nextIssue.slice(-4)}`);
-
+            // 1. Run Virtual Engines immediately (Instant)
             const numbers = list.slice(0, 30).map(x => parseInt(x.number));
             const sizes = numbers.map(n => n >= 5 ? "BIG" : "SMALL");
-
-            // Run 14 Virtual Engines
-            this.predictions.clear();
+            this.virtualPredictions.clear();
             for (let i = 1; i <= 14; i++) {
-                let pred = this.runEngine(i, sizes, numbers, nextIssue);
-                this.predictions.set(`Engine_${i}`, pred);
-                console.log(`[ENGINE ${i}] -> Prediction: ${pred.size}`);
+                this.virtualPredictions.set(`V_${i}`, this.runVirtual(i, sizes, numbers, nextIssue));
             }
 
-            const final = this.getAggregatedPrediction();
-            if (final) {
-                console.log(`[FINAL VOTE] Majority: ${final.size} | Conf: ${final.confidence}% | Engines: ${final.totalVotes}/14`);
+            // 2. Run Puppeteer Scraper in Batches (Priority)
+            this.scrapedPredictions.clear();
+            const batchSize = 3;
+            for (let i = 0; i < this.urls.length; i += batchSize) {
+                const batch = this.urls.slice(i, i + batchSize);
+                await Promise.all(batch.map(async (url) => {
+                    let page = null;
+                    try {
+                        page = await this.browser.newPage();
+                        await page.setRequestInterception(true);
+                        page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
+                        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+                        
+                        // Small interaction for specific sites
+                        if (url.includes('marzipan') || url.includes('brioche')) {
+                            await page.evaluate(() => {
+                                const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
+                                if (b) b.click();
+                            }).catch(() => {});
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+
+                        const result = await page.evaluate(() => {
+                            const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
+                            for (const el of candidates) {
+                                const text = el.innerText.trim().toUpperCase();
+                                if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
+                            }
+                            return null;
+                        });
+                        if (result) this.scrapedPredictions.set(url, result);
+                    } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
+                }));
             }
-            console.log("--------------------------------------------------");
+            console.log(`[SCRAPER] Cycle Done. Scraped: ${this.scrapedPredictions.size}, Virtual: 14`);
             this.lastProcessedIssue = issue;
         } catch (e) {
-            console.log("[VIRTUAL ERROR] " + e.message);
+            console.log("[SCRAPER ERROR] " + e.message);
         } finally {
             this.isUpdating = false;
         }
     }
 
-    /**
-     * @method runEngine
-     * @description Intha method thaan 14 different mathematical formulas-ah execute pannum.
-     */
-    runEngine(id, sizes, numbers, nextIssue) {
-        
-        // --- TYPE 1: STREAK REVERSAL LOGIC (Engines 1 to 4) ---
-        // Ithu 'Boss Bhai' hack site-oda formula. 
-        // Logic: Orey result (BIG/SMALL) thodarchiya vanthitta, aduthu 'Reversal' (change) aagum nu predict pannum.
+    runVirtual(id, sizes, numbers, nextIssue) {
         if (id <= 4) {
             let streak = 1;
-            for (let i = 0; i < sizes.length - 1; i++) {
-                if (sizes[i] === sizes[i+1]) streak++; else break;
-            }
+            for (let i = 0; i < sizes.length - 1; i++) if (sizes[i] === sizes[i+1]) streak++; else break;
             let res = sizes[0];
-            // Ovvoru engine-um ovvoru streak length-ah check pannum (e.g., Engine 1 checks 2-streak, Engine 4 checks 5-streak)
-            if (streak >= (id + 1)) {
-                res = (sizes[0] === "BIG" ? "SMALL" : "BIG"); // Reversal
-            }
-            return { size: res, number: (res === "BIG" ? 7 : 2) };
+            if (streak >= (id + 1)) res = (sizes[0] === "BIG" ? "SMALL" : "BIG");
+            return res;
         }
-        
-        // --- TYPE 2: PATTERN MATCHING & HYPER MATH (Engines 5 to 9) ---
-        // Ithu 'Draco Elite' hack site-oda formula.
-        // Logic: History-la irukkura sequences-ah pre-defined patterns kooda match pannum.
         if (id <= 9) {
-            const patterns = ["BSBSBS", "BBSSBBSS", "BBBSSS", "BSSBSS", "BBBSBBBS"];
-            const seq = sizes.slice(0, 6).map(s => s[0]).join(''); // Last 6 rounds sequence
-            
+            const patterns = ["BSBSBS", "BBSSBBSS", "BBBSSS", "BSSBSS"];
+            const seq = sizes.slice(0, 6).map(s => s[0]).join('');
             for (let p of patterns) {
                 let idx = p.indexOf(seq);
-                if (idx !== -1 && idx + seq.length < p.length) {
-                    // Pattern match aana, adutha character-ah prediction-ah edukkum
-                    let res = p[idx + seq.length] === 'B' ? 'BIG' : 'SMALL';
-                    return { size: res, number: (res === "BIG" ? 8 : 3) };
-                }
+                if (idx !== -1 && idx + seq.length < p.length) return p[idx + seq.length] === 'B' ? 'BIG' : 'SMALL';
             }
-
-            // HYPER MATH FALLBACK: 
-            // Pattern match aagala na, intha formula use aagum:
-            // (Last Number + Next Period's Last Digit + Engine ID) % 10
-            let mathVal = (numbers[0] + parseInt(nextIssue.slice(-1)) + id) % 10;
-            let res = mathVal >= 5 ? "BIG" : "SMALL";
-            return { size: res, number: mathVal };
+            return (numbers[0] + parseInt(nextIssue.slice(-1)) + id) % 10 >= 5 ? "BIG" : "SMALL";
         }
-
-        // --- TYPE 3: PATTERN DATABASE & PARITY (Engines 10 to 14) ---
-        // Ithu 'Friendship Day' site-oda formula.
-        // Logic: Chinna 3-round patterns-ah check pannum.
-        const db = {
-            "SSB": "BIG", "BSB": "SMALL", "BBS": "BIG", "SBB": "SMALL",
-            "SSS": "BIG", "BBB": "SMALL", "SBS": "BIG", "BSS": "SMALL"
-        };
-        const seq3 = sizes.slice(0, 3).map(s => s[0]).join(''); // Last 3 rounds
-        
-        let res;
-        if (db[seq3]) {
-            res = db[seq3];
-        } else {
-            // PARITY FALLBACK: 
-            // Last number 'Even' ah irunda BIG, 'Odd' ah irunda SMALL (Standard probability logic)
-            res = (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
-        }
-        
-        return { size: res, number: (res === "BIG" ? 6 : 1) };
+        return (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
     }
 
-    getAggregatedPrediction() {
+    getAggregatedPrediction(targetPeriod) {
         const votes = { BIG: 0, SMALL: 0 };
-        const numVotes = {};
-        let totalVotes = 0;
-
-        for (const [name, data] of this.predictions.entries()) {
-            if (data && data.size) {
-                const s = data.size.toUpperCase();
-                if (s === 'BIG') { votes.BIG++; totalVotes++; }
-                else if (s === 'SMALL') { votes.SMALL++; totalVotes++; }
-                if (data.number !== null) numVotes[data.number] = (numVotes[data.number] || 0) + 1;
-            }
+        
+        // Priority: Use Scraped Data
+        if (this.scrapedPredictions.size > 0) {
+            for (let s of this.scrapedPredictions.values()) votes[s]++;
+            console.log(`[VOTE] Using Scraped Majority (${this.scrapedPredictions.size} sites)`);
+        } 
+        // Fallback: Use Virtual Engines
+        else {
+            for (let s of this.virtualPredictions.values()) votes[s]++;
+            console.log(`[VOTE] Using Virtual Fallback (14 engines)`);
         }
 
-        if (totalVotes === 0) return null;
         const finalSize = votes.BIG >= votes.SMALL ? 'BIG' : 'SMALL';
-        let finalNumber = Object.keys(numVotes).reduce((a, b) => numVotes[a] > numVotes[b] ? a : b, 5);
-
-        return {
-            size: finalSize,
-            number: parseInt(finalNumber),
-            confidence: Math.round((Math.max(votes.BIG, votes.SMALL) / totalVotes) * 100),
-            totalVotes
+        const total = votes.BIG + votes.SMALL;
+        return { 
+            size: finalSize, 
+            confidence: Math.round((Math.max(votes.BIG, votes.SMALL) / (total || 1)) * 100),
+            totalVotes: total 
         };
     }
 }
@@ -1408,6 +1399,15 @@ waitLine+"\n"+
 
     let betPlaced = false;
     if (canBet) { 
+        // --- TIMING LOGIC: Bet in the last 15 seconds ---
+        const now = new Date();
+        const seconds = now.getSeconds();
+        const timeRemaining = 60 - seconds;
+        if (timeRemaining > 15) {
+            const waitTime = (timeRemaining - 15) * 1000;
+            console.log(`[TIMER] Waiting ${waitTime}ms to bet in the last 15s...`);
+            await new Promise(r => setTimeout(r, waitTime));
+        }
         const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level);
         if (result && result.ok) {
             betPlaced = true;
