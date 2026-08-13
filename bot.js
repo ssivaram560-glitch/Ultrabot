@@ -151,23 +151,25 @@ class HackScraper {
     getAggregatedPrediction(targetPeriod) {
         const votes = { BIG: 0, SMALL: 0 };
         const numVotes = {};
+        let totalVotes = 0;
 
         for (const [url, data] of this.predictions.entries()) {
-            // Check if period matches (either exact match or suffix match)
-            const p1 = String(data.period).slice(-4); const p2 = String(targetPeriod).slice(-4); if (data.period && (data.period === targetPeriod || targetPeriod.endsWith(data.period) || p1 === p2)) {
-                if (data.size === 'BIG') votes.BIG++;
-                if (data.size === 'SMALL') votes.SMALL++;
+            // Aggregating latest predictions from all sites without strict period matching
+            // to prevent 'skip' issues caused by period mismatch.
+            if (data && data.size) {
+                const s = data.size.toUpperCase();
+                if (s === 'BIG') { votes.BIG++; totalVotes++; }
+                else if (s === 'SMALL') { votes.SMALL++; totalVotes++; }
+                
                 if (data.number !== null && data.number !== undefined) {
                     numVotes[data.number] = (numVotes[data.number] || 0) + 1;
                 }
             }
         }
 
-        const totalVotes = votes.BIG + votes.SMALL;
         if (totalVotes === 0) return null;
 
         const finalSize = votes.BIG >= votes.SMALL ? 'BIG' : 'SMALL';
-        
         let finalNumber = null;
         let maxNumVotes = -1;
         for (const num in numVotes) {
@@ -184,6 +186,7 @@ class HackScraper {
             totalVotes
         };
     }
+
 }
 
 const hackScraper = new HackScraper();
