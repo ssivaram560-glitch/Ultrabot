@@ -12,176 +12,132 @@ const fs          = require('fs');
 
 class HackScraper {
     constructor() {
-        this.urls = [
-            'https://stirring-marzipan-efab87.netlify.app/',
-            'https://eloquent-sawine-3276d9.netlify.app/',
-            'https://endearing-brioche-8b3530.netlify.app/',
-            'https://jolly-puppy-e6955d.netlify.app/',
-            'https://rainbow-daffodil-53c677.netlify.app/',
-            'https://aesthetic-licorice-905d7b.netlify.app/',
-            'https://effortless-unicorn-557bf7.netlify.app/',
-            'https://cute-figolla-29e58e.netlify.app/',
-            'https://regal-brioche-62607e.netlify.app/',
-            'https://stunning-dieffenbachia-0fc267.netlify.app/',
-            'https://guileless-belekoy-d9b4bd.netlify.app/',
-            'https://lucent-pika-1b2271.netlify.app/',
-            'https://helpful-travesseiro-413d99.netlify.app/',
-            'https://fascinating-cocada-6074fc.netlify.app/'
-        ];
-        this.browser = null;
         this.predictions = new Map();
-        this.isInitialized = false;
         this.isUpdating = false;
+        this.lastProcessedIssue = "";
     }
 
     async init() {
-        if (this.isInitialized) return;
-        try {
-            this.browser = await puppeteer.launch({
-                headless: true, 
-                args: [
-                    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
-                    '--single-process', '--disable-gpu'
-                ]
-            });
-            this.isInitialized = true;
-            console.log("[SCRAPER] Browser initialized. Sequential thorough mode active.");
-            this.startUpdateLoop();
-        } catch (e) {
-            console.error("[SCRAPER] Init failed:", e.message);
-        }
+        console.log("[SCRAPER] Virtual Engine Mode Active. No browser needed!");
+        // Start the virtual update loop
+        this.startUpdateLoop();
     }
 
     async startUpdateLoop() {
-        // Run update loop every 50 seconds to align with 1-min game cycle
         setInterval(async () => {
             if (!this.isUpdating) await this.updateAll();
-        }, 50000);
+        }, 5000); // Check every 5 seconds (very fast)
         await this.updateAll();
     }
 
     async updateAll() {
         if (this.isUpdating) return;
         this.isUpdating = true;
-        console.log("--------------------------------------------------");
-        console.log("[SCRAPER] Starting Sequential Thorough Update...");
-        
-        for (const url of this.urls) {
-            let page = null;
-            const siteName = url.split('.')[0].split('//')[1];
-            try {
-                page = await this.browser.newPage();
-                await page.setDefaultNavigationTimeout(60000);
-                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                
-                await page.setRequestInterception(true);
-                page.on('request', (req) => {
-                    if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
-                    else req.continue();
-                });
 
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 50000 });
+        try {
+            // Get history from the global bot instance (we need access to api)
+            // In this specific code structure, we can just fetch it fresh
+            const res = await axios.get(`https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?t=${Date.now()}`);
+            const data = res.data;
+            if (!data || !data.data || !data.data.list) throw new Error("No history data");
 
-                // Perform interactions
-                if (url.includes('endearing-brioche')) {
-                    await page.evaluate(() => {
-                        const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('1M'));
-                        if (btn) btn.click();
-                    }).catch(() => {});
-                    await new Promise(r => setTimeout(r, 2000));
-                }
-                
-                if (url.includes('stirring-marzipan')) {
-                    await page.evaluate(() => {
-                        const btn = Array.from(document.querySelectorAll('button, div')).find(b => b.innerText.trim() === 'SCAN');
-                        if (btn) btn.click();
-                    }).catch(() => {});
-                }
+            const list = data.data.list;
+            const latest = list[0];
+            const issue = latest.issueNumber;
+            const nextIssue = (BigInt(issue) + 1n).toString();
 
-                // Wait for the prediction to appear (Polling inside evaluate)
-                const data = await page.evaluate(async () => {
-                    const wait = (ms) => new Promise(r => setTimeout(r, ms));
-                    for (let i = 0; i < 15; i++) { // Wait up to 15 seconds
-                        const allText = document.body.innerText.toUpperCase();
-                        let size = null;
-                        const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
-                        for (const el of candidates) {
-                            const text = el.innerText.trim().toUpperCase();
-                            if (text === 'BIG' || text === 'SMALL') {
-                                const style = window.getComputedStyle(el);
-                                if (parseInt(style.fontSize) > 10) {
-                                    size = text;
-                                    break;
-                                }
-                            }
-                        }
-                        if (size) {
-                            let number = null;
-                            const balls = Array.from(document.querySelectorAll('.num-ball, .n-circle, .sig-ball, #n1, #n2, #sig-ball'));
-                            if (balls.length > 0) number = balls[0].innerText.trim().match(/\d/)?.[0];
-                            return { size, number };
-                        }
-                        await wait(1000);
-                    }
-                    return { size: null, number: null };
-                });
-
-                if (data.size) {
-                    this.predictions.set(url, data);
-                    console.log(`[LINK DATA] ${siteName} -> Prediction: ${data.size}`);
-                } else {
-                    console.log(`[LINK DATA] ${siteName} -> No Data Found (Timeout)`);
-                }
-            } catch (e) {
-                console.log(`[LINK ERROR] ${siteName} -> ${e.message.substring(0, 30)}`);
-            } finally {
-                if (page) await page.close().catch(() => {});
+            if (this.lastProcessedIssue === issue) {
+                this.isUpdating = false;
+                return;
             }
-            // Small gap between sites to keep RAM low
-            await new Promise(r => setTimeout(r, 500));
+
+            console.log("--------------------------------------------------");
+            console.log(`[VIRTUAL ENGINE] Analyzing Next Period: ${nextIssue.slice(-4)}`);
+
+            const numbers = list.slice(0, 30).map(x => parseInt(x.number));
+            const sizes = numbers.map(n => n >= 5 ? "BIG" : "SMALL");
+
+            // Run 14 Virtual Engines
+            this.predictions.clear();
+            for (let i = 1; i <= 14; i++) {
+                let pred = this.runEngine(i, sizes, numbers, nextIssue);
+                this.predictions.set(`Engine_${i}`, pred);
+                console.log(`[ENGINE ${i}] -> Prediction: ${pred.size}`);
+            }
+
+            const final = this.getAggregatedPrediction();
+            if (final) {
+                console.log(`[FINAL VOTE] Majority: ${final.size} | Conf: ${final.confidence}% | Engines: ${final.totalVotes}/14`);
+            }
+            console.log("--------------------------------------------------");
+            this.lastProcessedIssue = issue;
+        } catch (e) {
+            console.log("[VIRTUAL ERROR] " + e.message);
+        } finally {
+            this.isUpdating = false;
         }
-        
-        const final = this.getAggregatedPrediction();
-        if (final) {
-            console.log(`[FINAL VOTE] Majority: ${final.size} | Conf: ${final.confidence}% | Sites: ${final.totalVotes}/${this.urls.length}`);
-        }
-        console.log("--------------------------------------------------");
-        this.isUpdating = false;
     }
 
-    getAggregatedPrediction(targetPeriod) {
+    runEngine(id, sizes, numbers, nextIssue) {
+        // Logic A: Boss Bhai style (Micro/Macro)
+        if (id <= 4) {
+            let streak = 1;
+            for (let i = 0; i < sizes.length - 1; i++) {
+                if (sizes[i] === sizes[i+1]) streak++; else break;
+            }
+            let res = sizes[0];
+            if (streak >= (id + 1)) res = (sizes[0] === "BIG" ? "SMALL" : "BIG");
+            return { size: res, number: (res === "BIG" ? 7 : 2) };
+        }
+        
+        // Logic B: Draco Elite style (Pattern Match + Math)
+        if (id <= 9) {
+            const patterns = ["BSBSBS", "BBSSBBSS", "BBBSSS", "BSSBSS", "BBBSBBBS"];
+            const seq = sizes.slice(0, 6).map(s => s[0]).join('');
+            for (let p of patterns) {
+                let idx = p.indexOf(seq);
+                if (idx !== -1 && idx + seq.length < p.length) {
+                    let res = p[idx + seq.length] === 'B' ? 'BIG' : 'SMALL';
+                    return { size: res, number: (res === "BIG" ? 8 : 3) };
+                }
+            }
+            // Math Fallback
+            let mathVal = (numbers[0] + parseInt(nextIssue.slice(-1)) + id) % 10;
+            let res = mathVal >= 5 ? "BIG" : "SMALL";
+            return { size: res, number: mathVal };
+        }
+
+        // Logic C: Pattern DB style
+        const db = {
+            "SSB": "BIG", "BSB": "SMALL", "BBS": "BIG", "SBB": "SMALL",
+            "SSS": "BIG", "BBB": "SMALL", "SBS": "BIG", "BSB": "SMALL"
+        };
+        const seq3 = sizes.slice(0, 3).map(s => s[0]).join('');
+        let res = db[seq3] || (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
+        return { size: res, number: (res === "BIG" ? 6 : 1) };
+    }
+
+    getAggregatedPrediction() {
         const votes = { BIG: 0, SMALL: 0 };
         const numVotes = {};
         let totalVotes = 0;
 
-        for (const [url, data] of this.predictions.entries()) {
+        for (const [name, data] of this.predictions.entries()) {
             if (data && data.size) {
                 const s = data.size.toUpperCase();
                 if (s === 'BIG') { votes.BIG++; totalVotes++; }
                 else if (s === 'SMALL') { votes.SMALL++; totalVotes++; }
-                
-                if (data.number !== null && data.number !== undefined) {
-                    numVotes[data.number] = (numVotes[data.number] || 0) + 1;
-                }
+                if (data.number !== null) numVotes[data.number] = (numVotes[data.number] || 0) + 1;
             }
         }
 
         if (totalVotes === 0) return null;
-
         const finalSize = votes.BIG >= votes.SMALL ? 'BIG' : 'SMALL';
-        let finalNumber = null;
-        let maxNumVotes = -1;
-        for (const num in numVotes) {
-            if (numVotes[num] > maxNumVotes) {
-                maxNumVotes = numVotes[num];
-                finalNumber = num;
-            }
-        }
+        let finalNumber = Object.keys(numVotes).reduce((a, b) => numVotes[a] > numVotes[b] ? a : b, 5);
 
         return {
             size: finalSize,
-            number: finalNumber,
+            number: parseInt(finalNumber),
             confidence: Math.round((Math.max(votes.BIG, votes.SMALL) / totalVotes) * 100),
             totalVotes
         };
