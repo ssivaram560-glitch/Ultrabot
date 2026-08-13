@@ -30,7 +30,7 @@ class HackScraper {
         this.scrapedPredictions = new Map();
         this.virtualPredictions = new Map();
         this.isUpdating = false;
-        this.lastProcessedIssue = "";
+        this.currentPeriod = "";
     }
 
     async init() {
@@ -39,84 +39,68 @@ class HackScraper {
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--disable-gpu']
             });
-            console.log("[SCRAPER] Hybrid Engine Active (Browser + Virtual Fallback).");
-            this.startUpdateLoop();
+            console.log("[SCRAPER] Hybrid Engine v10 (Wait & Scrape) Active.");
         } catch (e) {
             console.error("[SCRAPER] Browser Init Failed:", e.message);
         }
     }
 
-    async startUpdateLoop() {
-        setInterval(async () => {
-            if (!this.isUpdating) await this.updateAll();
-        }, 45000);
-        await this.updateAll();
+    async updateForPeriod(nextIssue, history) {
+        if (this.currentPeriod === nextIssue) return;
+        this.currentPeriod = nextIssue;
+        this.scrapedPredictions.clear();
+        this.virtualPredictions.clear();
+        
+        console.log(`[SCRAPER] New Period Detected: ${nextIssue}. Starting Analysis...`);
+
+        // 1. Run Virtual Engines (Instant Fallback)
+        const numbers = history.slice(0, 30).map(x => parseInt(x.number));
+        const sizes = numbers.map(n => n >= 5 ? "BIG" : "SMALL");
+        for (let i = 1; i <= 14; i++) {
+            this.virtualPredictions.set(`V_${i}`, this.runVirtual(i, sizes, numbers, nextIssue));
+        }
+
+        // 2. Start Scraping (Async)
+        this.startScraping(nextIssue);
     }
 
-    async updateAll() {
+    async startScraping(targetPeriod) {
         if (this.isUpdating) return;
         this.isUpdating = true;
-        console.log("[SCRAPER] Starting Hybrid Update Cycle...");
+        
+        const batchSize = 3;
+        for (let i = 0; i < this.urls.length; i += batchSize) {
+            if (this.currentPeriod !== targetPeriod) break;
+            const batch = this.urls.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (url) => {
+                let page = null;
+                try {
+                    page = await this.browser.newPage();
+                    await page.setRequestInterception(true);
+                    page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+                    
+                    if (url.includes('marzipan') || url.includes('brioche')) {
+                        await page.evaluate(() => {
+                            const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
+                            if (b) b.click();
+                        }).catch(() => {});
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
 
-        try {
-            const res = await axios.get("https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?t=" + Date.now());
-            const data = res.data;
-            if (!data || !data.data || !data.data.list) throw new Error("No history");
-
-            const list = data.data.list;
-            const latest = list[0];
-            const issue = latest.issueNumber;
-            const nextIssue = (BigInt(issue) + 1n).toString();
-
-            // 1. Run Virtual Engines immediately (Instant)
-            const numbers = list.slice(0, 30).map(x => parseInt(x.number));
-            const sizes = numbers.map(n => n >= 5 ? "BIG" : "SMALL");
-            this.virtualPredictions.clear();
-            for (let i = 1; i <= 14; i++) {
-                this.virtualPredictions.set(`V_${i}`, this.runVirtual(i, sizes, numbers, nextIssue));
-            }
-
-            // 2. Run Puppeteer Scraper in Batches (Priority)
-            this.scrapedPredictions.clear();
-            const batchSize = 3;
-            for (let i = 0; i < this.urls.length; i += batchSize) {
-                const batch = this.urls.slice(i, i + batchSize);
-                await Promise.all(batch.map(async (url) => {
-                    let page = null;
-                    try {
-                        page = await this.browser.newPage();
-                        await page.setRequestInterception(true);
-                        page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
-                        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-                        
-                        // Small interaction for specific sites
-                        if (url.includes('marzipan') || url.includes('brioche')) {
-                            await page.evaluate(() => {
-                                const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
-                                if (b) b.click();
-                            }).catch(() => {});
-                            await new Promise(r => setTimeout(r, 2000));
+                    const result = await page.evaluate(() => {
+                        const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
+                        for (const el of candidates) {
+                            const text = el.innerText.trim().toUpperCase();
+                            if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
                         }
-
-                        const result = await page.evaluate(() => {
-                            const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
-                            for (const el of candidates) {
-                                const text = el.innerText.trim().toUpperCase();
-                                if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
-                            }
-                            return null;
-                        });
-                        if (result) this.scrapedPredictions.set(url, result);
-                    } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
-                }));
-            }
-            console.log(`[SCRAPER] Cycle Done. Scraped: ${this.scrapedPredictions.size}, Virtual: 14`);
-            this.lastProcessedIssue = issue;
-        } catch (e) {
-            console.log("[SCRAPER ERROR] " + e.message);
-        } finally {
-            this.isUpdating = false;
+                        return null;
+                    });
+                    if (result) this.scrapedPredictions.set(url, result);
+                } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
+            }));
         }
+        this.isUpdating = false;
     }
 
     runVirtual(id, sizes, numbers, nextIssue) {
@@ -139,18 +123,15 @@ class HackScraper {
         return (numbers[0] % 2 === 0 ? "BIG" : "SMALL");
     }
 
-    getAggregatedPrediction(targetPeriod) {
+    getAggregatedPrediction() {
         const votes = { BIG: 0, SMALL: 0 };
+        let source = "VIRTUAL";
         
-        // Priority: Use Scraped Data
         if (this.scrapedPredictions.size > 0) {
             for (let s of this.scrapedPredictions.values()) votes[s]++;
-            console.log(`[VOTE] Using Scraped Majority (${this.scrapedPredictions.size} sites)`);
-        } 
-        // Fallback: Use Virtual Engines
-        else {
+            source = "SCRAPED";
+        } else {
             for (let s of this.virtualPredictions.values()) votes[s]++;
-            console.log(`[VOTE] Using Virtual Fallback (14 engines)`);
         }
 
         const finalSize = votes.BIG >= votes.SMALL ? 'BIG' : 'SMALL';
@@ -158,7 +139,8 @@ class HackScraper {
         return { 
             size: finalSize, 
             confidence: Math.round((Math.max(votes.BIG, votes.SMALL) / (total || 1)) * 100),
-            totalVotes: total 
+            totalVotes: total,
+            source: source
         };
     }
 }
@@ -1347,6 +1329,20 @@ async function runPredict(userId, chatId) {
     if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 2000);
     sentPeriods[userId].add(next);
 
+    // --- WAIT & SCRAPE LOGIC ---
+    await hackScraper.updateForPeriod(next, list);
+    
+    // Wait until scraped data is found OR 15s deadline reached
+    let waitStart = Date.now();
+    while (hackScraper.scrapedPredictions.size === 0) {
+        const seconds = new Date().getSeconds();
+        if (60 - seconds <= 15) {
+            console.log("[SCRAPER] 15s Deadline reached. Using whatever data available.");
+            break;
+        }
+        if (Date.now() - waitStart > 25000) break; // Safety timeout
+        await new Promise(r => setTimeout(r, 1000));
+    }
     const signal = decidePrediction(next, userId);
     if(!signal) return setTimeout(()=>runPredict(userId,chatId), 5000);
 
