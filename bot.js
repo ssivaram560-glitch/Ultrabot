@@ -158,7 +158,8 @@ class HackScraper {
         
         return { size: finalSize, confidence: conf, totalVotes: total, source: source };
     }
-}\n
+}
+
 const hackScraper = new HackScraper();
 
 
