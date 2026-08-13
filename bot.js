@@ -31,6 +31,7 @@ class HackScraper {
         this.virtualPredictions = new Map();
         this.isUpdating = false;
         this.currentPeriod = "";
+        this.analysisStartTime = 0;
     }
 
     async init() {
@@ -39,7 +40,7 @@ class HackScraper {
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--disable-gpu']
             });
-            console.log("[SCRAPER] Hybrid Engine v10 (Wait & Scrape) Active.");
+            console.log("[SCRAPER] Hybrid Engine v13 (35s Window) Active.");
         } catch (e) {
             console.error("[SCRAPER] Browser Init Failed:", e.message);
         }
@@ -50,8 +51,10 @@ class HackScraper {
         this.currentPeriod = nextIssue;
         this.scrapedPredictions.clear();
         this.virtualPredictions.clear();
+        this.analysisStartTime = Date.now();
         
-        console.log(`[SCRAPER] New Period Detected: ${nextIssue}. Starting Analysis...`);
+        console.log("--------------------------------------------------");
+        console.log(`[ANALYSIS] New Period: ${nextIssue.slice(-6)} | Max 35s Window Started...`);
 
         // 1. Run Virtual Engines (Instant Fallback)
         const numbers = history.slice(0, 30).map(x => parseInt(x.number));
@@ -68,37 +71,50 @@ class HackScraper {
         if (this.isUpdating) return;
         this.isUpdating = true;
         
-        const batchSize = 3;
-        for (let i = 0; i < this.urls.length; i += batchSize) {
+        for (let i = 0; i < this.urls.length; i++) {
             if (this.currentPeriod !== targetPeriod) break;
-            const batch = this.urls.slice(i, i + batchSize);
-            await Promise.all(batch.map(async (url) => {
-                let page = null;
-                try {
-                    page = await this.browser.newPage();
-                    await page.setRequestInterception(true);
-                    page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
-                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-                    
-                    if (url.includes('marzipan') || url.includes('brioche')) {
-                        await page.evaluate(() => {
-                            const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
-                            if (b) b.click();
-                        }).catch(() => {});
-                        await new Promise(r => setTimeout(r, 2000));
-                    }
+            
+            // Deadline checks: 35s elapsed OR 15s left in period
+            const elapsed = (Date.now() - this.analysisStartTime) / 1000;
+            const seconds = new Date().getSeconds();
+            const timeRemaining = 60 - seconds;
 
-                    const result = await page.evaluate(() => {
-                        const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
-                        for (const el of candidates) {
-                            const text = el.innerText.trim().toUpperCase();
-                            if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
-                        }
-                        return null;
-                    });
-                    if (result) this.scrapedPredictions.set(url, result);
-                } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
-            }));
+            if (elapsed >= 35 || timeRemaining <= 15) {
+                console.log(`[SCRAPER] Deadline hit (${elapsed.toFixed(1)}s elapsed). Stopping at ${i}/${this.urls.length} links.`);
+                break;
+            }
+
+            const url = this.urls[i];
+            const siteName = url.split('.')[0].split('//')[1].substring(0, 10);
+            let page = null;
+            try {
+                page = await this.browser.newPage();
+                await page.setRequestInterception(true);
+                page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                
+                if (url.includes('marzipan') || url.includes('brioche')) {
+                    await page.evaluate(() => {
+                        const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
+                        if (b) b.click();
+                    }).catch(() => {});
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+
+                const result = await page.evaluate(() => {
+                    const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
+                    for (const el of candidates) {
+                        const text = el.innerText.trim().toUpperCase();
+                        if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
+                    }
+                    return null;
+                });
+                
+                if (result) {
+                    this.scrapedPredictions.set(url, result);
+                    console.log(`[ANALYSIS] ${i+1}/${this.urls.length} | ${siteName} -> ${result}`);
+                }
+            } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
         }
         this.isUpdating = false;
     }
@@ -126,22 +142,26 @@ class HackScraper {
     getAggregatedPrediction() {
         const votes = { BIG: 0, SMALL: 0 };
         let source = "VIRTUAL";
+        let count = 0;
         
         if (this.scrapedPredictions.size > 0) {
             for (let s of this.scrapedPredictions.values()) votes[s]++;
             source = "SCRAPED";
+            count = this.scrapedPredictions.size;
         } else {
             for (let s of this.virtualPredictions.values()) votes[s]++;
+            source = "VIRTUAL";
+            count = this.virtualPredictions.size;
         }
 
         const finalSize = votes.BIG >= votes.SMALL ? 'BIG' : 'SMALL';
         const total = votes.BIG + votes.SMALL;
-        return { 
-            size: finalSize, 
-            confidence: Math.round((Math.max(votes.BIG, votes.SMALL) / (total || 1)) * 100),
-            totalVotes: total,
-            source: source
-        };
+        const conf = Math.round((Math.max(votes.BIG, votes.SMALL) / (total || 1)) * 100);
+        
+        console.log(`[DECISION] Source: ${source} | Links Used: ${count} | Winner: ${finalSize} (${conf}%)`);
+        console.log("--------------------------------------------------");
+        
+        return { size: finalSize, confidence: conf, totalVotes: total, source: source };
     }
 }
 
@@ -1040,6 +1060,7 @@ function decidePrediction(targetPeriod, userId) {
         val: pred.size,
         conf: pred.confidence,
         pat: scrapedCount > 0 ? "HACK_SCRAPER_LIVE" : "HACK_SCRAPER_VIRTUAL",
+        details: pred.details,
         reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes}/${totalSites} sites)`
     };
 }
@@ -1329,18 +1350,31 @@ async function runPredict(userId, chatId) {
     if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 2000);
     sentPeriods[userId].add(next);
 
-    // --- WAIT & SCRAPE LOGIC ---
+    // --- LIVE ANALYSIS WAIT LOGIC ---
     await hackScraper.updateForPeriod(next, list);
     
-    // Wait until scraped data is found OR 15s deadline reached
+    // Wait for at least 3 scraped results OR 15s deadline
     let waitStart = Date.now();
-    while (hackScraper.scrapedPredictions.size === 0) {
+    while (true) {
+        const elapsed = (Date.now() - waitStart) / 1000;
         const seconds = new Date().getSeconds();
-        if (60 - seconds <= 15) {
-            console.log("[SCRAPER] 15s Deadline reached. Using whatever data available.");
+        const timeRemaining = 60 - seconds;
+        
+        // 1. Stop if all 12 links are done
+        if (hackScraper.scrapedPredictions.size >= 12) break;
+        
+        // 2. Stop if 35 seconds of analysis elapsed
+        if (elapsed >= 35) {
+            console.log(`[SYSTEM] 35s Analysis window closed. Proceeding with ${hackScraper.scrapedPredictions.size} results.`);
             break;
         }
-        if (Date.now() - waitStart > 25000) break; // Safety timeout
+
+        // 3. Stop if only 15 seconds left in period (Safety)
+        if (timeRemaining <= 15) {
+            console.log(`[SYSTEM] 15s Safety deadline reached. Proceeding with ${hackScraper.scrapedPredictions.size} results.`);
+            break;
+        }
+        
         await new Promise(r => setTimeout(r, 1000));
     }
     const signal = decidePrediction(next, userId);
@@ -1387,7 +1421,7 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Signal  : "+(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL")+"\n"+
-"║ Pattern : "+patternName+"\n"+
+	"║ Pattern : "+patternName+"\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
