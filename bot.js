@@ -1,4 +1,4 @@
- const TelegramBot = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
 const zlib        = require('zlib');
@@ -616,7 +616,7 @@ function decidePrediction(list, currentLevel, userId) {
     let prediction;
     let patternName = "";
 
-    // Logic Mode (Same/Opposite)
+    // 1. Logic Mode (Same/Opposite) - Active for first 3 levels
     if (state.logicConsecutiveLoss < 3) {
         if (lastSize === prevSize) {
             prediction = lastSize; 
@@ -626,7 +626,10 @@ function decidePrediction(list, currentLevel, userId) {
             patternName = "OPP_LOGIC";
         }
     } else {
-        // Math Mode Fallback (Normal/Recovery)
+        // 2. Math Mode / Special Level Rules (L4 and above)
+        // Note: state.logicConsecutiveLoss >= 3 means we are at L4 or higher.
+        
+        // Prepare Math Predictions
         const currentPeriod = String(list[0].issueNumber);
         const nextPeriodNum = BigInt(currentPeriod) + 1n;
         const nextPeriod = nextPeriodNum.toString();
@@ -637,11 +640,42 @@ function decidePrediction(list, currentLevel, userId) {
         const first14 = noDecimal.substring(0, 14);
         const lastDigit = parseInt(first14.charAt(first14.length - 1));
 
-        const normalPrediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
-        const recoveryPrediction = lastDigit <= 4 ? 'BIG' : 'SMALL';
-        
-        prediction = (state.mode === "RECOVERY") ? recoveryPrediction : normalPrediction;
-        patternName = state.mode + "_MATH";
+        const normalPred = lastDigit <= 4 ? 'SMALL' : 'BIG';
+        const recoveryPred = lastDigit <= 4 ? 'BIG' : 'SMALL';
+        const oppositePred = (lastSize === "BIG" ? "SMALL" : "BIG");
+
+        // Apply Level Specific Rules
+        if (currentLevel === 4) {
+            prediction = normalPred;
+            patternName = "L4_NORMAL_MATH";
+        } 
+        else if (currentLevel === 5 || currentLevel === 7 || currentLevel === 8) {
+            // Check latest 5 for BSBSB/SBSBS
+            let last5 = "";
+            if (list.length >= 5) {
+                for(let i=0; i<5; i++) {
+                    const n = parseInt(list[i].number || list[i].winNumber || 0);
+                    last5 += (n >= 5 ? "B" : "S");
+                }
+            }
+            // Pattern check (though rule says OPPOSITE in both cases)
+            if (last5 === "BSBSB" || last5 === "SBSBS") {
+                prediction = oppositePred;
+                patternName = `L${currentLevel}_PATTERN_OPP`;
+            } else {
+                prediction = oppositePred;
+                patternName = `L${currentLevel}_TREND_OPP`;
+            }
+        }
+        else if (currentLevel === 6) {
+            prediction = recoveryPred;
+            patternName = "L6_RECOVERY_MATH";
+        }
+        else {
+            // Default for L9+
+            prediction = normalPred;
+            patternName = `L${currentLevel}_DEFAULT_MATH`;
+        }
     }
 
     return {
@@ -655,16 +689,15 @@ function decidePrediction(list, currentLevel, userId) {
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initState(userId);
     const state = userStates[userId];
-    
     state.lastPredictionWasLoss = !wasWin;
 
     if (wasWin) {
-        // Any win resets the bot to Logic Mode and resets Math mode to NORMAL
+        // Any win resets to Logic Mode
         state.logicConsecutiveLoss = 0; 
         state.mode = "NORMAL"; 
     } else {
         state.logicConsecutiveLoss++; 
-        // Loss triggers toggle for Math mode
+        // Maintain math toggle logic for state tracking
         if (state.mode === "NORMAL") state.mode = "RECOVERY";
         else state.mode = "NORMAL";
     }
@@ -694,7 +727,8 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
 function getStatus(userId) {
     initState(userId);
     const state = userStates[userId];
-    return state.mode + (state.logicConsecutiveLoss >= 3 ? " (MATH)" : " (LOGIC)");
+    let modeDesc = (state.logicConsecutiveLoss < 3) ? "LOGIC" : "MATH";
+    return `${modeDesc} (L${state.logicConsecutiveLoss + 1})`;
 }
 
 
