@@ -592,14 +592,9 @@ function initState(userId) {
     if (!userStates[userId]) {
         userStates[userId] = {
             mode: "NORMAL",              // Always starts in Normal Mode
-            pendingPrediction: true,
             forcedModeQueue: [],         // For pattern predictions (RNRNRN / NRNRNR)
-            historyModes: [],
-            periodCounter: 0,        
-            normalWinsIn20: 0,       
-            recoveryWinsIn20: 0,
-            lastPredictionWasLoss: false,
-            consecutivePatternLoss: 0
+            historyModes: [],            // History of completed modes
+            lastPredictionWasLoss: false
         };
     } else {
         if (!userStates[userId].historyModes) userStates[userId].historyModes = [];
@@ -612,16 +607,20 @@ function decidePrediction(list, currentLevel, userId) {
     if (!list || list.length < 2) return null;
     initState(userId);
     const state = userStates[userId];
-    let effectiveMode = state.mode;
     
-    // Pattern Detection
-    const patternStr = state.historyModes.join("");
-    if (patternStr.endsWith("NRNR")) {
-        state.forcedModeQueue = ['R', 'N', 'R', 'N', 'R', 'N'];
-    } else if (patternStr.endsWith("RNRN")) {
-        state.forcedModeQueue = ['N', 'R', 'N', 'R', 'N', 'R'];
+    // Pattern Detection - Trigger ONLY if last result was a LOSS
+    if (state.lastPredictionWasLoss) {
+        const patternStr = state.historyModes.join("");
+        if (patternStr.endsWith("NRNR")) {
+            // NRNR + Loss -> Trigger RNRNRN sequence
+            state.forcedModeQueue = ['R', 'N', 'R', 'N', 'R', 'N'];
+        } else if (patternStr.endsWith("RNRN")) {
+            // RNRN + Loss -> Trigger NRNRNR sequence
+            state.forcedModeQueue = ['N', 'R', 'N', 'R', 'N', 'R'];
+        }
     }
 
+    let effectiveMode = state.mode;
     if (state.forcedModeQueue && state.forcedModeQueue.length > 0) {
         const nextChar = state.forcedModeQueue[0];
         effectiveMode = (nextChar === "R") ? "RECOVERY" : "NORMAL";
@@ -642,10 +641,6 @@ function decidePrediction(list, currentLevel, userId) {
     const recoveryPrediction = lastDigit <= 4 ? 'BIG' : 'SMALL';
     const prediction = (effectiveMode === "RECOVERY") ? recoveryPrediction : normalPrediction;
 
-    const currentModeChar = effectiveMode === "NORMAL" ? "N" : "R";
-    state.historyModes.push(currentModeChar);
-    if (state.historyModes.length > 20) state.historyModes.shift();
-
     return {
         type: "SIZE",
         val: prediction,
@@ -657,15 +652,26 @@ function decidePrediction(list, currentLevel, userId) {
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initState(userId);
     const state = userStates[userId];
-    state.lastPredictionWasLoss = !wasWin;
-    state.periodCounter++;
+    
+    // Track which mode was just used
+    const usedModeChar = (state.forcedModeQueue && state.forcedModeQueue.length > 0) 
+        ? state.forcedModeQueue[0] 
+        : (state.mode === "NORMAL" ? "N" : "R");
+    
+    state.historyModes.push(usedModeChar);
+    if (state.historyModes.length > 20) state.historyModes.shift();
 
-    // Logic: Win -> Stay in mode, Loss -> Toggle mode
+    state.lastPredictionWasLoss = !wasWin;
+
+    // Mode transition logic:
+    // - Start in Normal
+    // - Loss -> Toggle (Normal <-> Recovery)
+    // - Win -> Maintain current mode
     if (!wasWin) {
-        if (state.mode === "NORMAL") state.mode = "RECOVERY";
-        else state.mode = "NORMAL";
+        state.mode = (state.mode === "NORMAL") ? "RECOVERY" : "NORMAL";
     }
 
+    // Advance forced queue if active
     if (state.forcedModeQueue && state.forcedModeQueue.length > 0) {
         state.forcedModeQueue.shift();
     }
