@@ -35,24 +35,23 @@ class HackScraper {
     }
 
     async init() {
-    if (this.isInitialized) return;
-    this.browser = await puppeteer.launch({
-        headless: true, 
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
-    });
-    const setupPage = async (p) => {
-        await p.setDefaultNavigationTimeout(90000);
-        await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    };
-    // ... rest of the logic
-}
-
+        if (this.isInitialized) return;
+        this.browser = await puppeteer.launch({
+            headless: true, 
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+        });
+        
+        const setupPage = async (p) => {
+            await p.setDefaultNavigationTimeout(90000);
+            await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        };
 
         console.log("[SCRAPER] Initializing 14 hack pages...");
         for (const url of this.urls) {
             try {
                 const page = await this.browser.newPage();
                 await page.setViewport({ width: 800, height: 600 });
+                
                 // Disable resource-heavy assets
                 await page.setRequestInterception(true);
                 page.on('request', (req) => {
@@ -62,6 +61,7 @@ class HackScraper {
                         req.continue();
                     }
                 });
+
                 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
                 this.pages.push({ url, page });
                 console.log(`[SCRAPER] Loaded: ${url}`);
@@ -72,6 +72,7 @@ class HackScraper {
         this.isInitialized = true;
         this.startUpdateLoop();
     }
+
 
     async startUpdateLoop() {
         setInterval(async () => {
