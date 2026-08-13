@@ -35,12 +35,18 @@ class HackScraper {
     }
 
     async init() {
-        if (this.isInitialized) return;
-        this.browser = await puppeteer.launch({
-            headless: true,
-            executablePath: '/usr/bin/chromium',
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        });
+    if (this.isInitialized) return;
+    this.browser = await puppeteer.launch({
+        headless: true, 
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+    });
+    const setupPage = async (p) => {
+        await p.setDefaultNavigationTimeout(90000);
+        await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    };
+    // ... rest of the logic
+}
+
 
         console.log("[SCRAPER] Initializing 14 hack pages...");
         for (const url of this.urls) {
@@ -70,7 +76,7 @@ class HackScraper {
     async startUpdateLoop() {
         setInterval(async () => {
             await this.updateAll();
-        }, 30000); // Update every 30 seconds
+        }, 15000); // Update every 15 seconds
         await this.updateAll();
     }
 
@@ -147,7 +153,7 @@ class HackScraper {
 
         for (const [url, data] of this.predictions.entries()) {
             // Check if period matches (either exact match or suffix match)
-            if (data.period && (data.period === targetPeriod || targetPeriod.endsWith(data.period) || data.period.endsWith(targetPeriod.slice(-4)))) {
+            const p1 = String(data.period).slice(-4); const p2 = String(targetPeriod).slice(-4); if (data.period && (data.period === targetPeriod || targetPeriod.endsWith(data.period) || p1 === p2)) {
                 if (data.size === 'BIG') votes.BIG++;
                 if (data.size === 'SMALL') votes.SMALL++;
                 if (data.number !== null && data.number !== undefined) {
@@ -1055,6 +1061,8 @@ function getLevelRequirement(level) {
 
 function decidePrediction(targetPeriod, userId) {
     const pred = hackScraper.getAggregatedPrediction(targetPeriod);
+    const cacheSize = hackScraper.predictions.size;
+    
     if (!pred) {
         return {
             type: "SIZE",
@@ -1062,7 +1070,7 @@ function decidePrediction(targetPeriod, userId) {
             skip: true,
             conf: 0,
             pat: "HACK_SCRAPER",
-            reason: "No votes from hack pages"
+            reason: `No votes (Cache: ${cacheSize} sites, Period: ${targetPeriod.slice(-4)})`
         };
     }
     return {
@@ -1070,7 +1078,7 @@ function decidePrediction(targetPeriod, userId) {
         val: pred.size,
         conf: pred.confidence,
         pat: "HACK_SCRAPER_VOTE",
-        reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes} sites)`
+        reason: `Votes: ${pred.size} (${pred.confidence}%, ${pred.totalVotes}/${cacheSize} sites)`
     };
 }
 
