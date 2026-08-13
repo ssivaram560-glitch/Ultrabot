@@ -660,11 +660,16 @@ function decidePrediction(list, currentLevel, userId) {
             prediction = oppositePred;
             patternName = "L5_OPPOSITE";
         }
-        else if (currentLevel >= 6) {
-            // L6, L7, L8, L9, L10 are all RECOVERY
+        else if (currentLevel === 6) {
             baseMode = "RECOVERY";
             prediction = recoveryPred;
-            patternName = `L${currentLevel}_RECOVERY`;
+            patternName = "L6_RECOVERY";
+        }
+        else if (currentLevel >= 7) {
+            // L7, L8, L9, L10 are all NORMAL
+            baseMode = "NORMAL";
+            prediction = normalPred;
+            patternName = `L${currentLevel}_NORMAL`;
         }
     }
 
@@ -673,12 +678,16 @@ function decidePrediction(list, currentLevel, userId) {
         shouldBet = false;
         patternName = `SKIP (${state.skipPeriods})`;
     } else if (state.waitingForRecovery) {
-        if (baseMode === "RECOVERY") {
+        // Wait for the correct mode signal before entry
+        if (baseMode === "NORMAL" && currentLevel >= 7) {
+            shouldBet = true;
+            patternName = `L${currentLevel}_ENTRY_NORM`;
+        } else if (baseMode === "RECOVERY" && currentLevel === 6) {
             shouldBet = true;
             patternName = `L${currentLevel}_ENTRY_REC`;
         } else {
             shouldBet = false;
-            patternName = `WAIT_REC (L${currentLevel})`;
+            patternName = `WAIT_${baseMode} (L${currentLevel})`;
         }
     }
 
@@ -751,7 +760,7 @@ function getStatus(userId) {
     const state = userStates[userId];
     const st = autobetState[userId];
     if (state.skipPeriods > 0) return `SKIPPING (${state.skipPeriods})`;
-    if (state.waitingForRecovery) return `WAITING REC (L${st.level})`;
+    if (state.waitingForRecovery) return `WAITING ${userStates[userId].mode} (L${st.level})`;
     return `ACTIVE (L${st.level})`;
 }
 
