@@ -40,7 +40,7 @@ class HackScraper {
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--disable-gpu']
             });
-            console.log("[SCRAPER] Hybrid Engine v13 (35s Window) Active.");
+            console.log("[SCRAPER] Hybrid Engine v17 (Turbo Speed Fixed) Active.");
         } catch (e) {
             console.error("[SCRAPER] Browser Init Failed:", e.message);
         }
@@ -54,16 +54,14 @@ class HackScraper {
         this.analysisStartTime = Date.now();
         
         console.log("--------------------------------------------------");
-        console.log(`[ANALYSIS] New Period: ${nextIssue.slice(-6)} | Max 35s Window Started...`);
+        console.log(`[ANALYSIS] New Period: ${nextIssue.slice(-6)} | Turbo Speed Check...`);
 
-        // 1. Run Virtual Engines (Instant Fallback)
         const numbers = history.slice(0, 30).map(x => parseInt(x.number));
         const sizes = numbers.map(n => n >= 5 ? "BIG" : "SMALL");
         for (let i = 1; i <= 14; i++) {
             this.virtualPredictions.set(`V_${i}`, this.runVirtual(i, sizes, numbers, nextIssue));
         }
 
-        // 2. Start Scraping (Async)
         this.startScraping(nextIssue);
     }
 
@@ -75,48 +73,43 @@ class HackScraper {
         for (let i = 0; i < this.urls.length; i += batchSize) {
             if (this.currentPeriod !== targetPeriod) break;
             
-            // Deadline checks: 35s elapsed OR 15s left in period
             const elapsed = (Date.now() - this.analysisStartTime) / 1000;
             const seconds = new Date().getSeconds();
-            const timeRemaining = 60 - seconds;
-
-            if (elapsed >= 35 || timeRemaining <= 15) {
-                console.log(`[SCRAPER] Deadline hit (${elapsed.toFixed(1)}s elapsed). Stopping at ${i}/${this.urls.length} links.`);
-                break;
-            }
+            if (elapsed >= 35 || (60 - seconds) <= 15) break;
 
             const batch = this.urls.slice(i, i + batchSize);
             await Promise.all(batch.map(async (url) => {
-            const siteName = url.split('.')[0].split('//')[1].substring(0, 10);
-            let page = null;
-            try {
-                page = await this.browser.newPage();
-                await page.setRequestInterception(true);
-                page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                
-                if (url.includes('marzipan') || url.includes('brioche')) {
-                    await page.evaluate(() => {
-                        const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
-                        if (b) b.click();
-                    }).catch(() => {});
-                    await new Promise(r => setTimeout(r, 1500));
-                }
-
-                const result = await page.evaluate(() => {
-                    const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
-                    for (const el of candidates) {
-                        const text = el.innerText.trim().toUpperCase();
-                        if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
+                const siteName = url.split('.')[0].split('//')[1].substring(0, 10);
+                let page = null;
+                try {
+                    page = await this.browser.newPage();
+                    await page.setRequestInterception(true);
+                    page.on('request', r => ['image','font','media'].includes(r.resourceType()) ? r.abort() : r.continue());
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                    
+                    if (url.includes('marzipan') || url.includes('brioche')) {
+                        await page.evaluate(() => {
+                            const b = Array.from(document.querySelectorAll('button, div')).find(x => x.innerText.match(/SCAN|1M/i));
+                            if (b) b.click();
+                        }).catch(() => {});
+                        await new Promise(r => setTimeout(r, 1500));
                     }
-                    return null;
-                });
-                
-                if (result) {
-                    this.scrapedPredictions.set(url, result);
-                    console.log(`[ANALYSIS] ${i+1}/${this.urls.length} | ${siteName} -> ${result}`);
-                }
-            } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
+
+                    const result = await page.evaluate(() => {
+                        const candidates = Array.from(document.querySelectorAll('div, span, h1, h2, h3, p, strong, b'));
+                        for (const el of candidates) {
+                            const text = el.innerText.trim().toUpperCase();
+                            if ((text === 'BIG' || text === 'SMALL') && parseInt(window.getComputedStyle(el).fontSize) > 10) return text;
+                        }
+                        return null;
+                    });
+                    
+                    if (result) {
+                        this.scrapedPredictions.set(url, result);
+                        console.log(`[ANALYSIS] Link -> ${siteName}: ${result}`);
+                    }
+                } catch (e) {} finally { if (page) await page.close().catch(() => {}); }
+            }));
         }
         this.isUpdating = false;
     }
@@ -165,8 +158,7 @@ class HackScraper {
         
         return { size: finalSize, confidence: conf, totalVotes: total, source: source };
     }
-}
-
+}\n
 const hackScraper = new HackScraper();
 
 
