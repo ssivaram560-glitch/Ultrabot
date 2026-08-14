@@ -673,22 +673,19 @@ function decidePrediction(list, currentLevel, userId) {
         }
     }
 
-    // Handle Skip and Waiting Logic
-    if (state.skipPeriods > 0) {
-        shouldBet = false;
-        patternName = `SKIP (${state.skipPeriods})`;
-    } else if (state.waitingForRecovery) {
-        // Wait for the correct mode signal before entry
-        if (baseMode === "NORMAL" && currentLevel >= 7) {
+    // Handle AutoBet Waiting Logic for L7-L10
+    if (state.waitingForRecovery && currentLevel >= 7) {
+        // Only bet if the mode matches NORMAL for L7-L10
+        if (baseMode === "NORMAL") {
             shouldBet = true;
             patternName = `L${currentLevel}_ENTRY_NORM`;
-        } else if (baseMode === "RECOVERY" && currentLevel === 6) {
-            shouldBet = true;
-            patternName = `L${currentLevel}_ENTRY_REC`;
         } else {
             shouldBet = false;
-            patternName = `WAIT_${baseMode} (L${currentLevel})`;
+            patternName = `WAIT_NORM (L${currentLevel})`;
         }
+    } else {
+        // Normal continuous prediction for L1-L6
+        shouldBet = true;
     }
 
     return {
@@ -706,18 +703,8 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     const st = autobetState[userId];
     const cfg = autobetCfg[userId];
     
-    // If skipping, decrement
-    if (state.skipPeriods > 0) {
-        state.skipPeriods--;
-        if (state.skipPeriods === 0) {
-            state.waitingForRecovery = true;
-        }
-        // Don't advance level during skip, it's handled by L6 loss trigger
-        return;
-    }
-
-    // If waiting for recovery and no bet was placed, just return
-    if (state.waitingForRecovery && !betPlaced) {
+    // If waiting for recovery and no bet was placed, just return (allow prediction to continue)
+    if (state.waitingForRecovery && st.level >= 7 && !betPlaced) {
         return;
     }
 
@@ -737,15 +724,17 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     } else {
         // Loss handling
         if (st.level === 6) {
-            state.skipPeriods = 6;
+            // L6 Loss -> Move to L7 and start waiting for Normal Mode entry
             st.level = 7;
-            state.waitingForRecovery = false; // Will be set true after 6 skips
+            state.waitingForRecovery = true;
+            state.logicConsecutiveLoss = 6; // Track level
         } else if (st.level >= 7) {
             st.level++;
-            state.waitingForRecovery = true; // Wait for next recovery for L8, L9, L10
+            state.waitingForRecovery = true; // Wait for next Normal Mode for L8, L9, L10
             if (st.level > cfg.maxLvl) {
                 st.level = 1;
                 state.waitingForRecovery = false;
+                state.logicConsecutiveLoss = 0;
             }
         } else {
             st.level++;
@@ -759,8 +748,8 @@ function getStatus(userId) {
     initState(userId);
     const state = userStates[userId];
     const st = autobetState[userId];
-    if (state.skipPeriods > 0) return `SKIPPING (${state.skipPeriods})`;
-    if (state.waitingForRecovery) return `WAITING ${userStates[userId].mode} (L${st.level})`;
+    
+    if (state.waitingForRecovery) return `WAITING NORM (L${st.level})`;
     return `ACTIVE (L${st.level})`;
 }
 
