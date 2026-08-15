@@ -8,7 +8,7 @@ const puppeteer   = require('puppeteer');
 //  CONFIG
 // ============================================================
 const BOT_TOKEN    ="8692459169:AAHmpdQ3pcdmi0lPJzmHiw7N-H7l1QzP8kI";
-const OWNER_ID     = 8321379592;
+const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
@@ -610,83 +610,125 @@ function initState(userId) {
 }
 
 function decidePrediction(list, currentLevel, userId) {
+function decidePrediction(list, currentLevel, userId) {
     if (!list || list.length < 2) return null;
+
     initState(userId);
     const state = userStates[userId];
-    
+
     const lastNum = parseInt(list[0].number || list[0].winNumber || 0);
+
     const prevNum = parseInt(list[1].number || list[1].winNumber || 0);
+
     const lastSize = lastNum >= 5 ? "BIG" : "SMALL";
     const prevSize = prevNum >= 5 ? "BIG" : "SMALL";
 
     let prediction;
     let patternName = "";
-    let shouldBet = true;
     let baseMode = "";
 
-    // Determine Base Logic/Mode
-    if (currentLevel <= 3) {
+    // L1-L6 logic repeat continuously
+    const logicLevel =
+        currentLevel <= 6
+            ? currentLevel
+            : ((currentLevel - 7) % 6) + 1;
+
+    // =========================
+    // L1 - L3 : LOGIC
+    // =========================
+    if (logicLevel <= 3) {
         baseMode = "LOGIC";
+
         if (lastSize === prevSize) {
-            prediction = lastSize; 
-            patternName = "SAME_LOGIC";
+            prediction = lastSize;
+            patternName = `L${logicLevel}_SAME_LOGIC`;
         } else {
-            prediction = (lastSize === "BIG" ? "SMALL" : "BIG"); 
-            patternName = "OPP_LOGIC";
+            prediction =
+                lastSize === "BIG"
+                    ? "SMALL"
+                    : "BIG";
+
+            patternName = `L${logicLevel}_OPP_LOGIC`;
         }
-    } else {
-        // Math/Special Rules
+    }
+
+    // =========================
+    // L4 - L6 : MATH / SPECIAL
+    // =========================
+    else {
         const currentPeriod = String(list[0].issueNumber);
-        const nextPeriodNum = BigInt(currentPeriod) + 1n;
-        const nextPeriod = nextPeriodNum.toString();
-        const nextLast3Num = parseInt(nextPeriod.slice(-3));
-        const answer = nextLast3Num * Math.exp(lastNum);
-        const answerStr = answer.toString();
-        const noDecimal = answerStr.replace('.', '');
-        const first14 = noDecimal.substring(0, 14);
-        const lastDigit = parseInt(first14.charAt(first14.length - 1));
 
-        const normalPred = lastDigit <= 4 ? 'SMALL' : 'BIG';
-        const recoveryPred = lastDigit <= 4 ? 'BIG' : 'SMALL';
-        const oppositePred = (lastSize === "BIG" ? "SMALL" : "BIG");
+        const nextPeriodNum =
+            BigInt(currentPeriod) + 1n;
 
-        if (currentLevel === 4) {
+        const nextPeriod =
+            nextPeriodNum.toString();
+
+        const nextLast3Num =
+            parseInt(nextPeriod.slice(-3));
+
+        const answer =
+            nextLast3Num * Math.exp(lastNum);
+
+        const answerStr =
+            answer.toString();
+
+        const noDecimal =
+            answerStr.replace('.', '');
+
+        const first14 =
+            noDecimal.substring(0, 14);
+
+        const lastDigit =
+            parseInt(
+                first14.charAt(first14.length - 1)
+            );
+
+        const normalPred =
+            lastDigit <= 4
+                ? "SMALL"
+                : "BIG";
+
+        const recoveryPred =
+            lastDigit <= 4
+                ? "BIG"
+                : "SMALL";
+
+        const oppositePred =
+            lastSize === "BIG"
+                ? "SMALL"
+                : "BIG";
+
+        // L4
+        if (logicLevel === 4) {
             baseMode = "NORMAL";
+
             prediction = normalPred;
+
             patternName = "L4_NORMAL_MATH";
-        } 
-        else if (currentLevel === 5) {
+        }
+
+        // L5
+        else if (logicLevel === 5) {
             baseMode = "OPPOSITE";
+
             prediction = oppositePred;
+
             patternName = "L5_OPPOSITE";
         }
-        else if (currentLevel === 6) {
+
+        // L6
+        else if (logicLevel === 6) {
             baseMode = "RECOVERY";
+
             prediction = recoveryPred;
+
             patternName = "L6_RECOVERY";
-        }
-        else if (currentLevel >= 7) {
-            // L7, L8, L9, L10 are all NORMAL
-            baseMode = "NORMAL";
-            prediction = normalPred;
-            patternName = `L${currentLevel}_NORMAL`;
         }
     }
 
-    // Handle AutoBet Waiting Logic for L7-L10
-    if (state.waitingForRecovery && currentLevel >= 7) {
-        // Only bet if the mode matches NORMAL for L7-L10
-        if (baseMode === "NORMAL") {
-            shouldBet = true;
-            patternName = `L${currentLevel}_ENTRY_NORM`;
-        } else {
-            shouldBet = false;
-            patternName = `WAIT_NORM (L${currentLevel})`;
-        }
-    } else {
-        // Normal continuous prediction for L1-L6
-        shouldBet = true;
-    }
+    // Always bet — no waiting/recovery restriction
+    const shouldBet = true;
 
     return {
         type: "SIZE",
@@ -695,7 +737,7 @@ function decidePrediction(list, currentLevel, userId) {
         pat: patternName,
         shouldBet: shouldBet
     };
-}
+    }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initState(userId);
