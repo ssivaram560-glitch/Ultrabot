@@ -984,84 +984,172 @@ waitLine+"\n"+
 // RESULT CHECKER
 // ============================================================
 async function checkResult(userId, chatId, target, predicted, predType, betPlaced) {
-    let tries = 0;
-    const cfg = autobetCfg[userId];
-    const st = autobetState[userId];
-    const pt = profitTrack[userId];
-    
+    const st = userStates[userId];
+    if (!st) return;
+
+    const cfg = configs[userId] || {};
+    const pt = profits[userId] || { pnl: 0 };
+
     const iv = setInterval(async () => {
-        if (!running[userId]) return clearInterval(iv);
-        if (++tries > 25) {
+        if (!running[userId]) {
             clearInterval(iv);
-            await logBoth(chatId, "⏱ Timeout — checking next period...");
-            setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 3000);
             return;
         }
-        const list = await fetchList(); if (!list) return;
-        if (BigInt(list[0].issueNumber) < BigInt(target)) return;
+
+        const list = await fetchList();
+
+        if (!list || !list.length) {
+            setTimeout(() => {
+                if (running[userId]) runPredict(userId, chatId);
+            }, 3000);
+
+            clearInterval(iv);
+            return;
+        }
+
+        if (BigInt(list[0].issueNumber) < BigInt(target)) {
+            return;
+        }
+
         clearInterval(iv);
 
-        const res = list.find(i => i.issueNumber === target) || list[0];
-        const num = parseInt(res.number || res.winNumber || 0);
+        const res =
+            list.find(i => String(i.issueNumber) === String(target)) ||
+            list[0];
+
+        const num = parseInt(
+            res.number || res.winNumber || 0
+        );
+
         let actual;
-        if (predType === "SIZE") actual = num >= 5 ? "BIG" : "SMALL";
-        else actual = num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN";
-        
+
+        if (predType === "SIZE") {
+            actual = num >= 5 ? "BIG" : "SMALL";
+        } else {
+            actual =
+                num === 0
+                    ? "RED"
+                    : num === 5
+                        ? "GREEN"
+                        : num % 2 === 0
+                            ? "RED"
+                            : "GREEN";
+        }
+
         const win = predicted === actual;
         const betLevel = st.level;
 
-        updateAfterResult(userId, win, actual, betPlaced);
+        updateAfterResult(
+            userId,
+            win,
+            actual,
+            betPlaced
+        );
 
         const s = stats[userId];
+
+        if (!s) return;
+
         s.total++;
+
         if (win) {
-            s.win++; s.winStreak++; s.lossStreak = 0;
-            if (s.winStreak > s.maxWinStreak) s.maxWinStreak = s.winStreak;
+            s.win++;
+            s.winStreak++;
+            s.lossStreak = 0;
+
+            if (s.winStreak > s.maxWinStreak) {
+                s.maxWinStreak = s.winStreak;
+            }
         } else {
-            s.loss++; s.lossStreak++; s.winStreak = 0;
-            if (s.lossStreak > s.maxLossStreak) s.maxLossStreak = s.lossStreak;
+            s.loss++;
+            s.lossStreak++;
+            s.winStreak = 0;
+
+            if (s.lossStreak > s.maxLossStreak) {
+                s.maxLossStreak = s.lossStreak;
+            }
         }
 
         if (betPlaced) {
-            if (win) await handleWin(userId, chatId, actual, num, betLevel);
-            else await handleLoss(userId, chatId, actual, num, betLevel);
+            if (win) {
+                await handleWin(
+                    userId,
+                    chatId,
+                    actual,
+                    num,
+                    betLevel
+                );
+            } else {
+                await handleLoss(
+                    userId,
+                    chatId,
+                    actual,
+                    num,
+                    betLevel
+                );
+            }
 
-            const targetProfit = Number(cfg.targetProfit) || 1000;
+            const targetProfit =
+                Number(cfg.targetProfit) || 1000;
+
             if (pt.pnl >= targetProfit) {
                 st.isWaiting = true;
-                st.nextStartTime = Date.now() + (Number(cfg.restartDelay) || 1) * 60 * 1000;
-                await send(chatId, "🎯 TARGET REACHED! Bot Paused.");
+
+                st.nextStartTime =
+                    Date.now() +
+                    (Number(cfg.restartDelay) || 1) *
+                    60 *
+                    1000;
+
+                await send(
+                    chatId,
+                    "🎯 TARGET REACHED! Bot Paused."
+                );
             }
         } else {
             if (win) {
-                await send(chatId, 
-                    "╔══════════════════════════╗\n"+
-                    "║  👀 WATCH RESULT: WIN! ✅ ║\n"+
-                    "╠══════════════════════════╣\n"+
-                    "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
-                    "║ Status : Correct Prediction\n"+
+                await send(
+                    chatId,
+                    "╔══════════════════════════╗\n" +
+                    "║  👀 WATCH RESULT: WIN! ✅ ║\n" +
+                    "╠══════════════════════════╣\n" +
+                    "║ Number : " + num + "\n" +
+                    "║ Result : " + actual + "\n" +
+                    "║ Status : Correct Prediction\n" +
                     "╚══════════════════════════╝"
                 );
-                await sendSticker(chatId, WIN_STICKER);
+
+                await sendSticker(
+                    chatId,
+                    WIN_STICKER
+                );
             } else {
-                await send(chatId, 
-                    "╔══════════════════════════╗\n"+
-                    "║  👀 WATCH RESULT: LOSS ❌ ║\n"+
-                    "╠══════════════════════════╣\n"+
-                    "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
-                    "║ Status : Incorrect Prediction\n"+
+                await send(
+                    chatId,
+                    "╔══════════════════════════╗\n" +
+                    "║  👀 WATCH RESULT: LOSS ❌ ║\n" +
+                    "╠══════════════════════════╣\n" +
+                    "║ Number : " + num + "\n" +
+                    "║ Result : " + actual + "\n" +
+                    "║ Status : Incorrect Prediction\n" +
                     "╚══════════════════════════╝"
                 );
-                await sendSticker(chatId, LOSS_STICKER);
+
+                await sendSticker(
+                    chatId,
+                    LOSS_STICKER
+                );
             }
         }
 
-        setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 8000);
+        setTimeout(() => {
+            if (running[userId]) {
+                runPredict(userId, chatId);
+            }
+        }, 8000);
+
     }, 10000);
 }
-
 module.exports = { decidePrediction, updateAfterResult, getStatus, initState, buildBSFromList, runPredict, checkResult };
 
 
