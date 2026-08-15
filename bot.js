@@ -610,7 +610,6 @@ function initState(userId) {
 }
 
 function decidePrediction(list, currentLevel, userId) {
-function decidePrediction(list, currentLevel, userId) {
     if (!list || list.length < 2) return null;
 
     initState(userId);
@@ -987,8 +986,9 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
     const st = userStates[userId];
     if (!st) return;
 
-    const cfg = configs[userId] || {};
-    const pt = profits[userId] || { pnl: 0 };
+    initUser(userId);
+    const cfg = autobetCfg[userId] || {};
+    const pt = profitTrack[userId] || { pnl: 0 };
 
     const iv = setInterval(async () => {
         if (!running[userId]) {
@@ -1588,4 +1588,5 @@ if(text==="🔢 Set Watch Losses"){
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
     });
 }
+
 startBot();
