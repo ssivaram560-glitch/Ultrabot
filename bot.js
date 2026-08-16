@@ -256,32 +256,47 @@ function ensurePredictionStorage(userId) {
 function savePredictionResult(userId, issue, predicted, actual, won, level, confidence, reason, predType = "SIZE", part = null) {
     try {
         const storage = ensurePredictionStorage(userId);
-        
-        // Record result
+        const issueId = String(issue);
+        const safeLevel = Math.max(1, Math.min(15, Number(level) || 1));
+
         const result = {
-            issue: String(issue),
+            issue: issueId,
             timestamp: Date.now(),
             predicted,
-            actual,
-            won: !!won,
-            level: Number(level) || 1,
+            actual: actual ?? null,
+            won: actual === null ? null : !!won,
+            level: safeLevel,
             confidence: Number(confidence) || 50,
             reason,
             type: predType,
             part: Number(part) || null
         };
-        
-        storage.results.push(result);
-        if (storage.results.length > 1000) {
-            storage.results.shift(); // Keep last 1000 results
+
+        // Update pending prediction when actual result arrives.
+        // Prevents one prediction from being counted twice.
+        const pendingEntry = storage.results
+            .map((item, index) => ({ item, index }))
+            .reverse()
+            .find(({ item }) =>
+                String(item.issue) === issueId && item.actual === null
+            );
+
+        if (pendingEntry && actual !== null) {
+            storage.results[pendingEntry.index] = {
+                ...storage.results[pendingEntry.index],
+                ...result,
+                timestamp: Date.now()
+            };
+        } else {
+            storage.results.push(result);
         }
-        
-        // Update statistics
+
+        if (storage.results.length > 1000) {
+            storage.results.splice(0, storage.results.length - 1000);
+        }
+
         updatePredictionStats(userId);
-        
-        // Save to disk
         savePersistentData();
-        
         return result;
     } catch (e) {
         console.error("[PREDICTION STORAGE ERROR]", e.message);
@@ -354,14 +369,14 @@ function getPredictionStats(userId, level = null) {
     return storage.stats;
 }
 
-// Returns every level's win count in compact format: L1:27 | L2:72 | ...
+// Always starts from L1 and shows the current win count for every level.
 function getLevelWinSummary(userId, maxLevel = 15) {
-    const statsData = getPredictionStats(userId);
+    const predictionStats = getPredictionStats(userId);
     const safeMaxLevel = Math.max(1, Math.min(15, Number(maxLevel) || 15));
     const levelParts = [];
 
     for (let level = 1; level <= safeMaxLevel; level++) {
-        const levelStats = statsData.byLevel[level] || {};
+        const levelStats = predictionStats.byLevel[level] || {};
         levelParts.push(`L${level}:${Number(levelStats.wins) || 0}`);
     }
 
@@ -2210,6 +2225,8 @@ async function handleWin(userId, chatId, actual, num, betLevel) {
     pt.winStreak++; pt.lossStreak = 0;
     if(pt.winStreak > pt.maxW) pt.maxW = pt.winStreak;
 
+    const levelWinStatus = getLevelWinSummary(userId, cfg.maxLvl || 15);
+
     let partLine = "Part   : P" + part;
     if (pe) {
         const w = Number(pe.wins)||0, l = Number(pe.losses)||0, t = w+l;
@@ -2228,6 +2245,7 @@ async function handleWin(userId, chatId, actual, num, betLevel) {
 "║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
 "║ Streak : "+pt.winStreak+" wins\n"+
 "║ Total  : "+pt.wins+"W/"+pt.losses+"L\n"+
+"║ Level Wins: "+levelWinStatus+"\n"+
 "║ Reset  : L1 | Watch 0/"+cfg.watchLoss+"\n"+
 "╚══════════════════════════╝"
     );
