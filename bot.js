@@ -310,7 +310,6 @@ async function fetchCaptcha() {
 // ============================================================
 //  AUTO LOGIN (PUPPETEER VERSION)
 // ============================================================
-
 async function autoLogin(userId, chatId, silent = false) {
     const creds = userCreds[userId] || {};
     const { phone, pass } = creds; // Or change 'pass' to 'password' here
@@ -320,16 +319,15 @@ async function autoLogin(userId, chatId, silent = false) {
         return false;
     }
 
-
     let browser;
+    let capturedToken = null; // Declare this outside the try block
+
     try {
         browser = await puppeteer.launch({
             headless: true, 
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
         });
-    let capturedToken = null;
-    
-    try {
+        
         const page = await browser.newPage();
         
         // === ANTI-DETECTION ===
@@ -370,7 +368,7 @@ async function autoLogin(userId, chatId, silent = false) {
 
         await sleep(500);
 
-        // Password input field (FIXED: using 'pass' instead of undefined 'password')
+        // Password input field
         const passwordInput = await page.$('input[type="password"]');
         if (passwordInput) {
             await passwordInput.type(pass, { delay: 50 });
