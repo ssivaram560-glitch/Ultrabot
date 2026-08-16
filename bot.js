@@ -369,13 +369,29 @@ function getPredictionStats(userId, level = null) {
     return storage.stats;
 }
 
-// Always starts from L1 and shows the current win count for every level.
+// Starts with L1 only and progressively adds higher levels when reached.
 function getLevelWinSummary(userId, maxLevel = 15) {
     const predictionStats = getPredictionStats(userId);
     const safeMaxLevel = Math.max(1, Math.min(15, Number(maxLevel) || 15));
-    const levelParts = [];
+    const currentLevel = Math.max(1, Number(autobetState[userId]?.level) || 1);
 
-    for (let level = 1; level <= safeMaxLevel; level++) {
+    const recordedLevels = Object.keys(predictionStats.byLevel || {})
+        .map(Number)
+        .filter(level => Number.isInteger(level) && level >= 1 && level <= safeMaxLevel);
+
+    const highestRecordedLevel = recordedLevels.length
+        ? Math.max(...recordedLevels)
+        : 1;
+
+    // Initial output: L1:0
+    // After reaching L2: L1:x | L2:y
+    const displayUntil = Math.min(
+        safeMaxLevel,
+        Math.max(1, currentLevel, highestRecordedLevel)
+    );
+
+    const levelParts = [];
+    for (let level = 1; level <= displayUntil; level++) {
         const levelStats = predictionStats.byLevel[level] || {};
         levelParts.push(`L${level}:${Number(levelStats.wins) || 0}`);
     }
