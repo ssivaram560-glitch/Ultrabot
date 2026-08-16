@@ -15,9 +15,8 @@ const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=74428159927
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER  = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
 
-// Prediction testing mode: no live bet-success response is required.
-// Set to false only when live betting is intentionally enabled.
-const TEST_MODE = true;
+// AutoBet mode is controlled per user through autobetCfg[userId].enabled.
+// AutoBet OFF = prediction/state testing only; AutoBet ON = live bet flow.
 
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
@@ -642,13 +641,13 @@ function decidePrediction(list, currentLevel, userId) {
     };
 }
 
-function updateAfterResult(userId, wasWin, actual, betPlaced) {
+function updateAfterResult(userId, wasWin, actual, betPlaced, trackStateOnly = false) {
     initState(userId);
     const state = userStates[userId];
     const st = autobetState[userId];
 
-    // A skipped period has no bet/result, so it must not affect loss counters.
-    if (!betPlaced) return;
+    // AutoBet OFF still tracks prediction results and levels; only profit accounting is skipped.
+    if (!betPlaced && !trackStateOnly) return;
 
     state.lastPredictionWasLoss = !wasWin;
 
@@ -835,14 +834,16 @@ async function runPredict(userId, chatId) {
 
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
+    const autoBetEnabled = Boolean(cfg && cfg.enabled);
 
-        if (!cfg || (!cfg.enabled && !TEST_MODE)) {
+    if (!autoBetEnabled) {
+        // Testing mode: show prediction only; no betting API or bet-success condition.
         abLine = "🤖 AutoBet: OFF";
         canBet = false;
     } else if (!signal.shouldBet) {
         abLine = "⏳ WAITING / SKIPPING";
         canBet = false;
-    } else if (!TEST_MODE && cfg.watch && st.consecutiveLoss < cfg.watchLoss) {
+    } else if (cfg.watch && st.consecutiveLoss < cfg.watchLoss) {
         abLine = `👀 WATCHING: ${st.consecutiveLoss}/${cfg.watchLoss}`;
         canBet = false;
     } else {
@@ -852,7 +853,7 @@ async function runPredict(userId, chatId) {
     }
 
     const patternName = signal && signal.pat ? signal.pat : (state && state.mode ? state.mode : "NORMAL");
-    const waitLine = (!TEST_MODE && cfg && cfg.watch && st.consecutiveLoss < cfg.watchLoss) ? "\nWatch Loss: " + st.consecutiveLoss + "/" + cfg.watchLoss : "";
+    const waitLine = (autoBetEnabled && cfg.watch && st.consecutiveLoss < cfg.watchLoss) ? "\nWatch Loss: " + st.consecutiveLoss + "/" + cfg.watchLoss : "";
 
     await send(chatId,
 "╔══════════════════════════╗\n"+
@@ -870,17 +871,13 @@ waitLine+"\n"+
 
     let betPlaced = false;
     if (canBet) {
-        if (TEST_MODE) {
-            // Test prediction only: count this as a simulated bet and do not call the betting API.
+        // AutoBet ON only: call the betting API and require its success before profit accounting.
+        const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level);
+        if (result && result.ok) {
             betPlaced = true;
-            await send(chatId, "🧪 TEST BET: " + signal.val + " L" + st.level + "\n⏳ Checking prediction result...");
-        } else {
-            const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level);
-            // Level/result flow must not depend on an API success response.
-            betPlaced = true;
-            await send(chatId, result && result.ok
-                ? "✅ Bet Success! ₹" + result.amt + " L" + st.level + "\n⏳ Checking result..."
-                : "🟡 Bet response ignored for level testing. L" + st.level + "\n⏳ Checking result...");
+            await send(chatId, "✅ Bet Success! ₹" + result.amt + " L" + st.level + "\n⏳ Checking result...");
+        } else if (result && !result.ok) {
+            await send(chatId, "❌ Bet Failed: " + (result.msg || "Unknown error"));
         }
     }
 
@@ -945,14 +942,29 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
         }
 
         const win = predicted === actual;
-        const betLevel = st.level;
+        const autoSt = autobetState[userId];
+        const betLevel = autoSt.level;
+        const autoBetEnabled = Boolean(cfg && cfg.enabled);
 
+        // Always update state/statistics; only AutoBet ON with successful bet updates profit.
         updateAfterResult(
             userId,
             win,
             actual,
-            betPlaced
+            betPlaced,
+            !autoBetEnabled
         );
+
+        // AutoBet ON: a failed bet response must not affect level, state, or profit.
+        // AutoBet OFF: prediction results are always tracked in Stats.
+        const shouldTrackResult = betPlaced || !autoBetEnabled;
+        if (!shouldTrackResult) {
+            await send(chatId, "ℹ️ Bet was not successful. Level and profit unchanged.");
+            setTimeout(() => {
+                if (running[userId]) runPredict(userId, chatId);
+            }, 8000);
+            return;
+        }
 
         const s = stats[userId];
 
