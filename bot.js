@@ -452,11 +452,11 @@ async function robustLogin(userId, chatId, silent = false) {
 //  IMPROVED PLACE BET FUNCTION (Silent Retries & Multi-Request Fix)
 // ============================================================
 // ============================================================
-const NUMBER_BET_PREFIX = process.env.NUMBER_BET_PREFIX || "WinGo_Number_";
+const NUMBER_BET_PREFIX = process.env.NUMBER_BET_PREFIX || "Num_";
 
-function pickOppositeRangeNumber(prediction) {
-    // Big prediction -> choose one of 0..4 (Small); Small prediction -> 5..9 (Big).
-    const pool = prediction === "BIG" ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
+function pickSameRangeNumber(prediction) {
+    // BIG prediction -> random BIG number 5..9; SMALL prediction -> random SMALL number 0..4.
+    const pool = prediction === "BIG" ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
     return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -952,23 +952,33 @@ waitLine+"\n"+
         {reply_markup:{inline_keyboard:[[{text:"💰 CHECK NOW",url:REG_LINK}]]}}
     );
 
-    // The number bet is intentionally from the opposite size range:
-    // BIG signal -> SMALL number (0-4); SMALL signal -> BIG number (5-9).
-    const selectedNumber = signal.type === "SIZE" ? pickOppositeRangeNumber(signal.val) : null;
+    // One period receives two bets when the signal is SIZE:
+    // 1) the predicted Big/Small category; 2) one exact number inside that same category.
+    const selectedNumber = signal.type === "SIZE" ? pickSameRangeNumber(signal.val) : null;
     if (signal.type === "SIZE") {
-        await send(chatId, `🎲 Random number selected: ${selectedNumber} (${selectedNumber >= 5 ? "BIG" : "SMALL"})`);
+        await send(chatId, `🎲 Number bet: ${selectedNumber} (${selectedNumber >= 5 ? "BIG" : "SMALL"}) + category bet: ${signal.val}`);
     }
 
     let betPlaced = false;
+    let categoryResult = null;
+    let numberResult = null;
     if (canBet) {
-        // AutoBet ON only: call the betting API and require its success before profit accounting.
-        const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level, selectedNumber);
-        if (result && result.ok) {
-            betPlaced = true;
-            await send(chatId, "✅ Bet Success! ₹" + result.amt + " L" + st.level + "\n⏳ Checking result...");
-        } else if (result && !result.ok) {
-            await send(chatId, "❌ Bet Failed: " + (result.msg || "Unknown error"));
+        // AutoBet ON only: place both bets for the same period.
+        categoryResult = await placeBet(userId, chatId, next, signal.val, signal.type, st.level, null);
+        if (signal.type === "SIZE") {
+            numberResult = await placeBet(userId, chatId, next, signal.val, signal.type, st.level, selectedNumber);
         }
+
+        const categoryOk = Boolean(categoryResult && categoryResult.ok);
+        const numberOk = signal.type === "SIZE" ? Boolean(numberResult && numberResult.ok) : false;
+        betPlaced = categoryOk || numberOk;
+
+        await send(chatId,
+            `📌 Period ${next.slice(-6)} bets\n` +
+            `• ${categoryOk ? "✅" : "❌"} Category: ${signal.val}\n` +
+            (signal.type === "SIZE" ? `• ${numberOk ? "✅" : "❌"} Number: ${selectedNumber}\n` : "") +
+            (betPlaced ? "⏳ Checking result..." : "❌ No bet accepted")
+        );
     }
 
     checkResult(userId, chatId, next, signal.val, signal.type, betPlaced, selectedNumber);
