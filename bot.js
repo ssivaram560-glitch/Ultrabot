@@ -7,6 +7,7 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
+// Keep secrets outside source control. Set these in the runtime environment.
 const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
@@ -451,7 +452,19 @@ async function robustLogin(userId, chatId, silent = false) {
 //  IMPROVED PLACE BET FUNCTION (Silent Retries & Multi-Request Fix)
 // ============================================================
 // ============================================================
-async function placeBet(userId, chatId, period, prediction, predType, level) {
+const NUMBER_BET_PREFIX = process.env.NUMBER_BET_PREFIX || "WinGo_Number_";
+
+function pickOppositeRangeNumber(prediction) {
+    // Big prediction -> choose one of 0..4 (Small); Small prediction -> 5..9 (Big).
+    const pool = prediction === "BIG" ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
+    return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function numberBetContent(number) {
+    return NUMBER_BET_PREFIX + String(number);
+}
+
+async function placeBet(userId, chatId, period, prediction, predType, level, selectedNumber = null) {
     let token = getToken(userId);
     if (!token || token.length < 20) {
         console.log("[PLACE BET] Token missing or invalid, attempting autoLogin...");
@@ -470,7 +483,11 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
     const maxRetries = 5; 
     const retryDelayMs = 2000; 
 
-    if (predType === "SIZE")  bc = prediction === "BIG" ? "BigSmall_Big" : "BigSmall_Small";
+    if (predType === "SIZE") {
+        bc = Number.isInteger(selectedNumber)
+            ? numberBetContent(selectedNumber)
+            : (prediction === "BIG" ? "BigSmall_Big" : "BigSmall_Small");
+    }
     if (predType === "COLOR") bc = prediction === "RED" ? "Color_Red"    : "Color_Green";
 
     console.log(`[BET] ${bc} ₹${betMult} L${level} for Period: ${period}`);
@@ -935,10 +952,17 @@ waitLine+"\n"+
         {reply_markup:{inline_keyboard:[[{text:"💰 CHECK NOW",url:REG_LINK}]]}}
     );
 
+    // The number bet is intentionally from the opposite size range:
+    // BIG signal -> SMALL number (0-4); SMALL signal -> BIG number (5-9).
+    const selectedNumber = signal.type === "SIZE" ? pickOppositeRangeNumber(signal.val) : null;
+    if (signal.type === "SIZE") {
+        await send(chatId, `🎲 Random number selected: ${selectedNumber} (${selectedNumber >= 5 ? "BIG" : "SMALL"})`);
+    }
+
     let betPlaced = false;
     if (canBet) {
         // AutoBet ON only: call the betting API and require its success before profit accounting.
-        const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level);
+        const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level, selectedNumber);
         if (result && result.ok) {
             betPlaced = true;
             await send(chatId, "✅ Bet Success! ₹" + result.amt + " L" + st.level + "\n⏳ Checking result...");
@@ -947,13 +971,13 @@ waitLine+"\n"+
         }
     }
 
-    checkResult(userId, chatId, next, signal.val, signal.type, betPlaced);
+    checkResult(userId, chatId, next, signal.val, signal.type, betPlaced, selectedNumber);
 }
 
 // ============================================================
 // RESULT CHECKER
 // ============================================================
-async function checkResult(userId, chatId, target, predicted, predType, betPlaced) {
+async function checkResult(userId, chatId, target, predicted, predType, betPlaced, selectedNumber = null) {
     const st = userStates[userId];
     if (!st) return;
 
@@ -1007,7 +1031,11 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
                             : "GREEN";
         }
 
-        const win = predicted === actual;
+        // A numeric bet wins only when the drawn digit exactly matches it.
+        // Fallback preserves the old Big/Small behaviour for non-numeric bets.
+        const win = Number.isInteger(selectedNumber)
+            ? num === selectedNumber
+            : predicted === actual;
         const autoSt = autobetState[userId];
         const betLevel = autoSt.level;
         const autoBetEnabled = Boolean(cfg && cfg.enabled);
