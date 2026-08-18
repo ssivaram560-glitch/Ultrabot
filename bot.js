@@ -619,8 +619,31 @@ function initState(userId) {
     }
 }
 
+function reduceToSingleDigit(value) {
+    let n = Math.abs(Number(value)) || 0;
+    while (n >= 10) {
+        n = String(n).split("").reduce((sum, digit) => sum + Number(digit), 0);
+    }
+    return n;
+}
+
+function deterministicSizePrediction(list) {
+    if (!Array.isArray(list) || list.length < 7) return null;
+    const getNumber = (index) => Number.parseInt(list[index]?.number ?? list[index]?.winNumber ?? 0, 10) || 0;
+    const r1 = getNumber(0);
+    const r3 = getNumber(2);
+    const r5 = getNumber(4);
+    const r7 = getNumber(6);
+    const weightedTotal = (r1 * 4) + (r3 * 3) + (r5 * 2) + (r7 * 1);
+    const finalDigit = reduceToSingleDigit(weightedTotal);
+    return {
+        r1, r3, r5, r7, weightedTotal, finalDigit,
+        prediction: finalDigit <= 4 ? "SMALL" : "BIG"
+    };
+}
+
 function decidePrediction(list, currentLevel, userId) {
-    if (!list || list.length < 2) {
+    if (!list || list.length < 7) {
         return null;
     }
 
@@ -666,27 +689,15 @@ function decidePrediction(list, currentLevel, userId) {
         effectiveMode = state.mode;
     }
 
-    const currentPeriod = String(list[0].issueNumber);
-    const currentResult = parseInt(list[0].number || list[0].winNumber || 0);
+    const formula = deterministicSizePrediction(list);
+    if (!formula) return null;
 
-    const nextPeriodNum = BigInt(currentPeriod) + 1n;
-    const nextPeriod = nextPeriodNum.toString();
-    const nextLast3Num = parseInt(nextPeriod.slice(-3));
+    // Deterministic formula:
+    // 1st result × 4 + 3rd result × 3 + 5th result × 2 + 7th result × 1.
+    // Reduce the total to one digit; 0–4 = SMALL and 5–9 = BIG.
+    prediction = formula.prediction;
 
-    const answer = nextLast3Num * Math.exp(currentResult);
-    const answerStr = answer.toString();
-    const noDecimal = answerStr.replace('.', '');
-    const first14 = noDecimal.substring(0, 14);
-    const lastDigit = parseInt(first14.charAt(first14.length - 1));
-
-    const normalPrediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
-    const recoveryPrediction = lastDigit <= 4 ? 'BIG' : 'SMALL';
-
-    if (effectiveMode === "RECOVERY") {
-        prediction = recoveryPrediction;
-    } else {
-        prediction = normalPrediction;
-    }
+    const formulaMode = effectiveMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
 
     const currentModeChar = effectiveMode === "NORMAL" ? "N" : "R";
     if (state.historyModes[state.historyModes.length - 1] !== currentModeChar) {
@@ -695,10 +706,10 @@ function decidePrediction(list, currentLevel, userId) {
     }
 
     const betMode = autobetCfg[userId]?.mode || "SIZE";
-    // NUMBER mode uses the final digit from the existing calculation and bets that exact digit.
+    // NUMBER mode intentionally ignores the formula result and always bets exact number 5.
     return betMode === "NUMBER"
-        ? { type: "NUMBER", val: lastDigit, conf: 85, pat: effectiveMode + "_NUMBER" }
-        : { type: "SIZE", val: prediction, conf: 85, pat: effectiveMode + "_SIZE" };
+        ? { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_FIXED_5" , formula }
+        : { type: "SIZE", val: prediction, conf: 85, pat: formulaMode + "_FORMULA", formula };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
@@ -907,6 +918,9 @@ async function runPredict(userId, chatId) {
     }
 
     const patternName = signal && signal.pat ? signal.pat : (state && state.mode ? state.mode : "NORMAL");
+    const formulaLine = signal.formula
+        ? `\\nFormula: ${signal.formula.r1}×4 + ${signal.formula.r3}×3 + ${signal.formula.r5}×2 + ${signal.formula.r7}×1 = ${signal.formula.weightedTotal} → ${signal.formula.finalDigit}`
+        : "";
     const waitLine = (cfg && cfg.watch && st.consecutiveLoss < cfg.watchLoss) ? "\nWatch Loss: " + st.consecutiveLoss + "/" + cfg.watchLoss : "";
 
     await send(chatId,
@@ -917,7 +931,8 @@ async function runPredict(userId, chatId) {
 "║ Mode    : "+(cfg.mode==="NUMBER"?"🔢 NUMBER":"🔵 BIG/SMALL")+"\n"+
 "║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL"))+"\n"+
 "║ Pattern : "+patternName+"\n"+
-"╠══════════════════════════╣\n"+
+formulaLine+
+"\n╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
 "╚══════════════════════════╝",
