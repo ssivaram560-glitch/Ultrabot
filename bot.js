@@ -60,9 +60,31 @@ let autobetCfg     = {};
 let autobetState   = {};
 let profitTrack    = {};
 let GLOBAL_TOKEN   = "";
-let userTokens = {}; 
+let userTokens = {};
+const nextRunTimers = new Map();
+const resultCheckTimers = new Map();
+const MAX_SENT_PERIODS = 6;
+const MAX_LEVEL_HISTORY = 10;
 
+function clearUserTimers(userId) {
+    const nextTimer = nextRunTimers.get(String(userId));
+    if (nextTimer) clearTimeout(nextTimer);
+    nextRunTimers.delete(String(userId));
+    const resultTimer = resultCheckTimers.get(String(userId));
+    if (resultTimer) clearInterval(resultTimer);
+    resultCheckTimers.delete(String(userId));
+}
 
+function scheduleRun(userId, chatId, delayMs) {
+    const key = String(userId);
+    const oldTimer = nextRunTimers.get(key);
+    if (oldTimer) clearTimeout(oldTimer);
+    const timer = setTimeout(() => {
+        nextRunTimers.delete(key);
+        if (running[userId]) runPredict(userId, chatId);
+    }, delayMs);
+    nextRunTimers.set(key, timer);
+}
 
 // ============================================================
 //  LOGGING HELPER (New)
@@ -177,8 +199,10 @@ function initUser(id) {
         lastWinLevel:null,
         lastWinMode:null,
         isWaiting: false,      // NEW: Bot waiting-la irukka-nu check panna
-        nextStartTime: null    // NEW: Thirumba eppo start aakanum-nu store panna
+        nextStartTime: null,   // NEW: Thirumba eppo start aakanum-nu store panna
+        levelHistory: {}        // bounded count map: L1:26, L2:4, ...
     };
+    if (!autobetState[id].levelHistory || typeof autobetState[id].levelHistory !== "object") autobetState[id].levelHistory = {};
     if (!profitTrack[id])  profitTrack[id]  = { totalBets:0, wins:0, losses:0, pnl:0, winStreak:0, lossStreak:0, maxW:0, maxL:0, totalBetAmount: 0 };
 }
 
@@ -435,6 +459,7 @@ async function autoLogin(userId, chatId, silent = false) {
         if (browser) await browser.close();
     }
 }
+
 // ============================================================
 //  ROBUST LOGIN WITH CONTINUOUS RETRY
 // ============================================================
@@ -734,8 +759,8 @@ function decidePrediction(list, currentLevel, userId) {
     const betMode = autobetCfg[userId]?.mode || "SIZE";
     // NUMBER mode intentionally ignores the formula result and always bets exact number 5.
     return betMode === "NUMBER"
-        ? { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_FIXED_5" , formula }
-        : { type: "SIZE", val: prediction, conf: 85, pat: formulaMode + "_FORMULA", formula };
+        ? { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER", formula }
+        : { type: "SIZE", val: prediction, conf: 85, pat: formulaMode, formula };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
@@ -914,19 +939,23 @@ async function runPredict(userId, chatId) {
             profitTrack[userId].pnl = 0; 
             await send(chatId, "🔄 Timed Restart! Starting new section...");
         } else {
-            return setTimeout(()=>runPredict(userId,chatId), 30000);
+            scheduleRun(userId, chatId, 30000);
+            return;
         }
     }
 
     const list = await fetchList();
-    if(!list) return setTimeout(()=>runPredict(userId,chatId), 15000);
+    if(!list) { scheduleRun(userId, chatId, 15000); return; }
 
     const next = (BigInt(list[0].issueNumber)+1n).toString();
-    if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 2000);
+    if(sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 2000); return; }
     sentPeriods[userId].add(next);
+    while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
+        sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
+    }
 
     const signal = decidePrediction(list, st.level, userId);
-    if(!signal) return setTimeout(()=>runPredict(userId,chatId), 5000);
+    if(!signal) { scheduleRun(userId, chatId, 5000); return; }
 
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
@@ -944,9 +973,6 @@ async function runPredict(userId, chatId) {
     }
 
     const patternName = signal && signal.pat ? signal.pat : (state && state.mode ? state.mode : "NORMAL");
-    const formulaLine = signal.formula
-        ? `\\nFormula: ${signal.formula.r1}×4 + ${signal.formula.r3}×3 + ${signal.formula.r5}×2 + ${signal.formula.r7}×1 = ${signal.formula.weightedTotal} → ${signal.formula.finalDigit}`
-        : "";
     const waitLine = (cfg && cfg.watch && st.consecutiveLoss < cfg.watchLoss) ? "\nWatch Loss: " + st.consecutiveLoss + "/" + cfg.watchLoss : "";
 
     await send(chatId,
@@ -957,8 +983,7 @@ async function runPredict(userId, chatId) {
 "║ Mode    : "+(cfg.mode==="NUMBER"?"🔢 NUMBER":"🔵 BIG/SMALL")+"\n"+
 "║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL"))+"\n"+
 "║ Pattern : "+patternName+"\n"+
-formulaLine+
-"\n╠══════════════════════════╣\n"+
+"╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
 "╚══════════════════════════╝",
@@ -983,22 +1008,31 @@ waitLine+"\n"+
 // RESULT CHECKER
 // ============================================================
 async function checkResult(userId, chatId, target, predicted, predType, betPlaced) {
+    const timerKey = String(userId);
+    const previousTimer = resultCheckTimers.get(timerKey);
+    if (previousTimer) clearInterval(previousTimer);
     let tries = 0;
     const cfg = autobetCfg[userId];
     const st = autobetState[userId];
     const pt = profitTrack[userId];
     
     const iv = setInterval(async () => {
-        if (!running[userId]) return clearInterval(iv);
+        if (!running[userId]) {
+            clearInterval(iv);
+            if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
+            return;
+        }
         if (++tries > 25) {
             clearInterval(iv);
+            if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
             await logBoth(chatId, "⏱ Timeout — checking next period...");
-            setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 3000);
+            scheduleRun(userId, chatId, 3000);
             return;
         }
         const list = await fetchList(); if (!list) return;
         if (BigInt(list[0].issueNumber) < BigInt(target)) return;
         clearInterval(iv);
+        if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
 
         const res = list.find(i => i.issueNumber === target) || list[0];
         const num = parseInt(res.number || res.winNumber || 0);
@@ -1009,6 +1043,12 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
 
         const win = predType === "NUMBER" ? Number(predicted) === num : predicted === actual;
         const betLevel = st.level;
+        if (betPlaced) {
+            const key = "L" + betLevel;
+            st.levelHistory[key] = (st.levelHistory[key] || 0) + 1;
+            const keys = Object.keys(st.levelHistory).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+            while (keys.length > MAX_LEVEL_HISTORY) delete st.levelHistory[keys.shift()];
+        }
 
         updateAfterResult(userId, win, actual, betPlaced);
 
@@ -1058,8 +1098,9 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
             }
         }
 
-        setTimeout(() => { if (running[userId]) runPredict(userId, chatId); }, 8000);
+        scheduleRun(userId, chatId, 8000);
     }, 10000);
+    resultCheckTimers.set(timerKey, iv);
 }
 
 module.exports = { decidePrediction, updateAfterResult, getStatus, initState, buildBSFromList, runPredict, checkResult };
@@ -1133,6 +1174,7 @@ waitLine+"\n"+
 "In Mart  : "+(st.inMart?"YES":"NO")+"\n"+
 "Current  : L"+st.level+"\n"+
 "Last Win : "+(st.lastWinLevel?"L"+st.lastWinLevel+" ("+(st.lastWinMode||cfg.mode)+")":"None")+"\n"+
+"History  : "+(Object.entries(st.levelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n"+
 "P&L      : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n\n"+
 "Mart: ₹"+amounts.join("→₹")
     );
@@ -1321,6 +1363,7 @@ function addHandlers(){
                     report += `💰 Total Bet: ₹${(pt.totalBetAmount || 0).toFixed(2)}\n`;
                     report += `📈 Profit: ₹${pnlStr}\n`;
                     report += `🎮 Level: L${st.level}\n`;
+                    report += `🧾 History: ${Object.entries(st.levelHistory || {}).map(([level, count]) => level + ":" + count).join(" | ") || "None"}\n`;
                     report += `📊 Win/Loss: ${pt.wins}W / ${pt.losses}L\n`;
                     report += `------------------------\n`;
                 });
@@ -1490,6 +1533,7 @@ if(text==="🔢 Set Watch Losses"){
             if(!hasAccess(id))return send(msg.chat.id,"❌ No access!\n📩 "+ADMIN_HANDLE+"\nID: "+id);
             if(running[id])return send(msg.chat.id,"⚠️ Already running!");
 
+            clearUserTimers(id);
             running[id]=true;sentPeriods[id]=new Set();
             autobetState[id]={...(autobetState[id]||{}),level:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
 
@@ -1511,7 +1555,7 @@ if(text==="🔢 Set Watch Losses"){
             );
             runPredict(id,msg.chat.id);
         }
-        if(text==="🛑 Stop")   {running[id]=false;send(msg.chat.id,"🛑 Stopped.");}
+        if(text==="🛑 Stop")   {running[id]=false;clearUserTimers(id);sentPeriods[id]=new Set();send(msg.chat.id,"🛑 Stopped.");}
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
