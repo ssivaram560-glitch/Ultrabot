@@ -7,6 +7,7 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
+// ============================================================
 const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
@@ -19,6 +20,7 @@ const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
 const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+const SITE_URL    = "https://splendid-haupia-b5569e.netlify.app/";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
@@ -63,8 +65,22 @@ let GLOBAL_TOKEN   = "";
 let userTokens = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
+let hiddenBrowser = null;
+let hiddenPage = null;
+let hiddenPagePromise = null;
+let latestSitePrediction = null;
 const MAX_SENT_PERIODS = 6;
 const MAX_LEVEL_HISTORY = 10;
+
+async function closeHiddenSite() {
+    try { if (hiddenPage && !hiddenPage.isClosed()) await hiddenPage.close(); } catch {}
+    try { if (hiddenBrowser) await hiddenBrowser.close(); } catch {}
+    hiddenPage = null;
+    hiddenBrowser = null;
+    hiddenPagePromise = null;
+}
+process.once("SIGINT", () => closeHiddenSite().finally(() => process.exit(0)));
+process.once("SIGTERM", () => closeHiddenSite().finally(() => process.exit(0)));
 
 function clearUserTimers(userId) {
     const nextTimer = nextRunTimers.get(String(userId));
@@ -107,24 +123,49 @@ async function logBoth(chatId, msg, isError = false) {
 // ============================================================
 //  HELPERS
 // ============================================================
+async function getHiddenSitePage() {
+    if (hiddenPage && !hiddenPage.isClosed()) return hiddenPage;
+    if (!hiddenPagePromise) {
+        hiddenPagePromise = (async () => {
+            hiddenBrowser = await puppeteer.launch({
+                headless: true,
+                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            });
+            hiddenPage = await hiddenBrowser.newPage();
+            await hiddenPage.setViewport({ width: 420, height: 900 });
+            await hiddenPage.goto(SITE_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+            await new Promise(resolve => setTimeout(resolve, 6000));
+            return hiddenPage;
+        })().catch(error => {
+            hiddenPagePromise = null;
+            hiddenPage = null;
+            if (hiddenBrowser) hiddenBrowser.close().catch(() => {});
+            hiddenBrowser = null;
+            throw error;
+        });
+    }
+    return hiddenPagePromise;
+}
+
 async function fetchList() {
     try {
-        const response = await axios.get(DRAW_URL, {
-            headers: {
-                "Accept": "application/json, text/plain, */*",
-                "Origin": "https://bdgwin901.com",
-                "Referer": "https://bdgwin901.com/",
-                "Ar-Origin": "https://bdgwin901.com",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36"
-            },
-            timeout: 10000
+        const page = await getHiddenSitePage();
+        const snapshot = await page.evaluate(async () => {
+            const response = await fetch("/api/wingo-history?pageSize=20&type=1", { cache: "no-store" });
+            const json = await response.json();
+            const list = json?.data?.list || [];
+            const heading = document.querySelector(".text-5xl.md\:text-6xl.font-black");
+            const parentText = heading?.parentElement?.innerText || "";
+            const lines = parentText.split(/\n+/).map(v => v.trim()).filter(Boolean);
+            const side = heading?.textContent?.trim() || null;
+            const numbers = lines.slice(1).filter(v => /^\d$/.test(v)).slice(0, 2).map(Number);
+            return { list, sitePrediction: { side, numbers, raw: parentText } };
         });
-        if (response.data && response.data.data && response.data.data.list) {
-            return response.data.data.list;
-        }
+        latestSitePrediction = snapshot.sitePrediction;
+        if (Array.isArray(snapshot.list) && snapshot.list.length) return snapshot.list;
         return [];
     } catch (error) {
-        console.error("[FETCH LIST ERROR]", error.message);
+        console.error("[HIDDEN SITE ERROR]", error.message);
         return null;
     }
 }
@@ -779,8 +820,9 @@ function decidePrediction(list, currentLevel, userId) {
 
     const engine = htmlCorePrediction(list, state);
     if (!engine) return null;
-    prediction = engine.side;
-    const formulaMode = engine.reason;
+    const siteSide = latestSitePrediction?.side === "BIG" || latestSitePrediction?.side === "SMALL" ? latestSitePrediction.side : engine.side;
+    prediction = siteSide;
+    const formulaMode = "SITE";
 
     const currentModeChar = effectiveMode === "NORMAL" ? "N" : "R";
     if (state.historyModes[state.historyModes.length - 1] !== currentModeChar) {
@@ -797,12 +839,14 @@ function decidePrediction(list, currentLevel, userId) {
             bets: [{ type: "NUMBER", val: 5, kind: "number" }] };
     }
     if (betMode === "COMBINED") {
-        const pair = engine.numbers;
+        const siteNums = Array.isArray(latestSitePrediction?.numbers) && latestSitePrediction.numbers.length === 2
+            ? latestSitePrediction.numbers
+            : [engine.numbers.small, engine.numbers.big];
         return { type: "COMBINED", val: prediction, conf: 85, pat: formulaMode + "_COMBINED",
             bets: [
                 { type: "SIZE", val: prediction, kind: "size" },
-                { type: "NUMBER", val: pair.small, kind: "number" },
-                { type: "NUMBER", val: pair.big, kind: "number" }
+                { type: "NUMBER", val: siteNums[0], kind: "number" },
+                { type: "NUMBER", val: siteNums[1], kind: "number" }
             ] };
     }
     return { type: "SIZE", val: prediction, conf: 85, pat: formulaMode,
