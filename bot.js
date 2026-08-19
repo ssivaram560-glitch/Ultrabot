@@ -18,7 +18,7 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
@@ -184,7 +184,8 @@ function initUser(id) {
         watchLoss:2, 
         baseBet:1, 
         maxLvl:5, 
-        enabled:false, 
+        enabled:false,
+        dryRun:true,
         mode:"SIZE", // SIZE, NUMBER, or COMBINED
         customBets:[1,3,9,27,81],
         customSizeBets:[1,3,9,27,81],
@@ -482,6 +483,10 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
     if (predType === "COLOR") bc = prediction === "RED" ? "Color_Red" : "Color_Green";
 
     console.log(`[BET] ${bc} ₹${betMult} L${level} for Period: ${period}`);
+    if (cfg.dryRun !== false) {
+        console.log(`[DRY-RUN] Skipping API call: ${bc} ₹${betMult} L${level} Period ${period}`);
+        return { ok:true, dryRun:true, amt:betMult, bc };
+    }
 
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -490,7 +495,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    "WinGo_30S", 
+                gameCode:    "WinGo_1M", 
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -683,14 +688,16 @@ function getSequenceAmount(userId, level, kind = "default") {
     return Number(seq?.[level - 1] ?? (cfg.baseBet * (MULT[level - 1] || 1)));
 }
 
-function pickOppositeNumbers(list, predictedSide) {
-    const pool = predictedSide === "BIG" ? [0,1,2,3,4] : [5,6,7,8,9];
-    const counts = Object.fromEntries(pool.map(n => [n, 0]));
+function pickOneEachSide(list) {
+    const big = [5,6,7,8,9];
+    const small = [0,1,2,3,4];
+    const counts = Object.fromEntries([...big, ...small].map(n => [n, 0]));
     for (const item of (Array.isArray(list) ? list : [])) {
         const n = Number.parseInt(item?.number ?? item?.winNumber ?? -1, 10);
         if (Object.prototype.hasOwnProperty.call(counts, n)) counts[n]++;
     }
-    return pool.slice().sort((a, b) => counts[a] - counts[b] || a - b).slice(0, 2);
+    const choose = pool => pool.slice().sort((a,b) => counts[a]-counts[b] || a-b)[0];
+    return { big: choose(big), small: choose(small) };
 }
 
 function isThreeResultSkip(list) {
@@ -720,7 +727,7 @@ function htmlCorePrediction(list, state) {
         side = bigCount >= 4 ? "SMALL" : bigCount <= 1 ? "BIG" : opposite;
         reason = "REVERSAL";
     }
-    return { side, reason, skip: isThreeResultSkip(list), numbers: pickOppositeNumbers(list, side) };
+    return { side, reason, skip: isThreeResultSkip(list), numbers: pickOneEachSide(list) };
 }
 
 function decidePrediction(list, currentLevel, userId) {
@@ -790,12 +797,12 @@ function decidePrediction(list, currentLevel, userId) {
             bets: [{ type: "NUMBER", val: 5, kind: "number" }] };
     }
     if (betMode === "COMBINED") {
-        const oppositeNumbers = pickOppositeNumbers(list, prediction);
+        const pair = engine.numbers;
         return { type: "COMBINED", val: prediction, conf: 85, pat: formulaMode + "_COMBINED",
             bets: [
                 { type: "SIZE", val: prediction, kind: "size" },
-                { type: "NUMBER", val: oppositeNumbers[0], kind: "number" },
-                { type: "NUMBER", val: oppositeNumbers[1], kind: "number" }
+                { type: "NUMBER", val: pair.small, kind: "number" },
+                { type: "NUMBER", val: pair.big, kind: "number" }
             ] };
     }
     return { type: "SIZE", val: prediction, conf: 85, pat: formulaMode,
@@ -997,7 +1004,7 @@ async function runPredict(userId, chatId) {
     if(!signal) { scheduleRun(userId, chatId, 5000); return; }
     if (signal.skip) {
         await send(chatId, "⏭ SKIP: 3-result alternating pattern detected\nNo bet for period " + next.slice(-6));
-        scheduleRun(userId, chatId, 8000);
+        scheduleRun(userId, chatId, 15000);
         return;
     }
 
@@ -1026,7 +1033,7 @@ async function runPredict(userId, chatId) {
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Mode    : "+modeLabel(cfg.mode)+"\n"+
 "║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.val==="COMBINED"?"🔀 "+signal.val:""+(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL")))+"\n"+
-(cfg.mode==="COMBINED" ? "║ Opposite: "+signal.bets.filter(b=>b.type==="NUMBER").map(b=>b.val).join(", ")+"\n" : "")+
+(cfg.mode==="COMBINED" ? "║ Numbers : Small "+signal.bets.find(b=>b.type==="NUMBER" && Number(b.val)<=4)?.val+" | Big "+signal.bets.find(b=>b.type==="NUMBER" && Number(b.val)>=5)?.val+"\n" : "")+
 "║ Pattern : "+patternName+"\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
@@ -1045,7 +1052,7 @@ waitLine+"\n"+
             else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
         }
         if (placedBets.length) {
-            await send(chatId, "✅ Bets Success: " + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
+            await send(chatId, (cfg.dryRun ? "🧪 SIMULATED: " : "✅ Bets Success: ") + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
         }
     }
 
@@ -1074,7 +1081,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             clearInterval(iv);
             if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
             await logBoth(chatId, "⏱ Timeout — checking next period...");
-            scheduleRun(userId, chatId, 3000);
+            scheduleRun(userId, chatId, 15000);
             return;
         }
         const list = await fetchList(); if (!list) return;
@@ -1214,6 +1221,7 @@ async function autobetStatus(chatId, userId) {
 "Token    : "+(token.length>20?"✅":"❌")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n"+
 "Mode     : "+modeLabel(cfg.mode)+"\n"+
+"Dry-run  : "+(cfg.dryRun?"✅ ON (no real bet)":"❌ OFF")+"\n"+
 "Size Bets: ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
 "Num Bets : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
@@ -1238,7 +1246,7 @@ waitLine+"\n"+
 //  KEYBOARDS
 // ============================================================
 function userMenu(id){
-    const rows=[["▶️ Start Prediction","🛑 Stop"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
+    const rows=[["▶️ Start Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
     if(isAdmin(id))rows.push(["👑 Admin Panel"]);
     return{keyboard:rows,resize_keyboard:true};
 }
@@ -1253,6 +1261,7 @@ const autobetMenu={keyboard:[
     ["🎮 Mode: Big/Small","🔢 Mode: Number"],
     ["🔀 Mode: BigSmall+Number","📝 Set Custom Bets"],
     ["💵 Set Size Bets","🔢 Set Number Bets"],
+    ["🧪 Dry-run: ON/OFF"],
     ["🔙 Back"]
 ],resize_keyboard:true};
 
@@ -1495,6 +1504,7 @@ function addHandlers(){
 "Token    : "+(getToken(id).length>20?"✅ SET":"❌ MISSING")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n"+
 "Mode     : "+modeLabel(cfg.mode)+"\n"+
+"Dry-run  : "+(cfg.dryRun?"✅ ON (no real bet)":"❌ OFF")+"\n"+
 "Size Seq : ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
 "Num Seq  : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
@@ -1526,6 +1536,10 @@ function addHandlers(){
         if(text==="👀 Watch Mode ON") {autobetCfg[id].watch=true;return send(id,"👀 Watch ON — "+autobetCfg[id].watchLoss+" losses → bet");}
         if(text==="👀 Watch Mode OFF"){autobetCfg[id].watch=false;return send(id,"👀 Watch OFF — Direct bet!");}
                         // --- CORRECTED SETTINGS HANDLERS ---
+        if(text==="🧪 Dry-run: ON/OFF"){
+            autobetCfg[id].dryRun = !autobetCfg[id].dryRun;
+            return send(id, autobetCfg[id].dryRun ? "🧪 Dry-run ON — API bet calls disabled." : "⚠️ Dry-run OFF — real API calls enabled.", {reply_markup:autobetMenu});
+        }
         if(text==="🎮 Mode: Big/Small"){
             autobetCfg[id].mode="SIZE";
             return send(id,"✅ Mode set: BIG/SMALL\nCategory bet enabled.",{reply_markup:autobetMenu});
@@ -1615,11 +1629,10 @@ if(text==="🔢 Set Watch Losses"){
 
             const cfg=autobetCfg[id];
             await send(msg.chat.id,
-"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
+"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nDryRun : "+(cfg.dryRun?"ON":"OFF")+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
             );
             runPredict(id,msg.chat.id);
         }
-        if(text==="🛑 Stop")   {running[id]=false;clearUserTimers(id);sentPeriods[id]=new Set();send(msg.chat.id,"🛑 Stopped.");}
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
