@@ -64,10 +64,14 @@ let GLOBAL_TOKEN   = "";
 let userTokens = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
+const resultCheckInFlight = new Set();
+const runInFlight = new Set();
+const loginInFlight = new Map();
 let hiddenBrowser = null;
 let hiddenPage = null;
 let hiddenPagePromise = null;
 let latestSitePrediction = null;
+let hiddenSiteLastUsed = 0;
 const MAX_SENT_PERIODS = 6;
 const MAX_LEVEL_HISTORY = 10;
 
@@ -86,7 +90,8 @@ function clearUserTimers(userId) {
     if (nextTimer) clearTimeout(nextTimer);
     nextRunTimers.delete(String(userId));
     const resultTimer = resultCheckTimers.get(String(userId));
-    if (resultTimer) clearInterval(resultTimer);
+    if (resultTimer) clearTimeout(resultTimer);
+    resultCheckInFlight.delete(String(userId));
     resultCheckTimers.delete(String(userId));
 }
 
@@ -123,7 +128,10 @@ async function logBoth(chatId, msg, isError = false) {
 //  HELPERS
 // ============================================================
 async function getHiddenSitePage() {
-    if (hiddenPage && !hiddenPage.isClosed()) return hiddenPage;
+    if (hiddenPage && !hiddenPage.isClosed()) {
+        hiddenSiteLastUsed = Date.now();
+        return hiddenPage;
+    }
     if (!hiddenPagePromise) {
         hiddenPagePromise = (async () => {
             hiddenBrowser = await puppeteer.launch({
@@ -131,9 +139,11 @@ async function getHiddenSitePage() {
                 args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             });
             hiddenPage = await hiddenBrowser.newPage();
+            await hiddenPage.setCacheEnabled(false);
             await hiddenPage.setViewport({ width: 420, height: 900 });
             await hiddenPage.goto(SITE_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
             await new Promise(resolve => setTimeout(resolve, 6000));
+            hiddenSiteLastUsed = Date.now();
             return hiddenPage;
         })().catch(error => {
             hiddenPagePromise = null;
@@ -240,7 +250,7 @@ async function getLiveBalance(userId, chatId = null) {
 }
 
 function initUser(id) {
-    if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0 };
+    if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0,levelWins:{},sizeLevelWins:{},numberLevelWins:{} };
    if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
@@ -414,6 +424,15 @@ async function fetchCaptcha() {
 // ============================================================
 
 async function autoLogin(userId, chatId, silent = false) {
+    const loginKey = String(userId);
+    if (loginInFlight.has(loginKey)) return loginInFlight.get(loginKey);
+    const loginPromise = autoLoginImpl(userId, chatId, silent);
+    loginInFlight.set(loginKey, loginPromise);
+    try { return await loginPromise; }
+    finally { loginInFlight.delete(loginKey); }
+}
+
+async function autoLoginImpl(userId, chatId, silent = false) {
     const creds = userCreds[userId] || {};
     const { phone, pass } = creds; // Or change 'pass' to 'password' here
 
@@ -423,6 +442,8 @@ async function autoLogin(userId, chatId, silent = false) {
     }
 
     let browser;
+    let page;
+    let requestHandler;
     let capturedToken = null; // Declare this outside the try block
 
     try {
@@ -431,7 +452,7 @@ async function autoLogin(userId, chatId, silent = false) {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
         });
         
-        const page = await browser.newPage();
+        page = await browser.newPage();
         
         // === ANTI-DETECTION ===
         await page.evaluateOnNewDocument(() => {
@@ -446,13 +467,14 @@ async function autoLogin(userId, chatId, silent = false) {
         
         // === TOKEN CAPTURE FROM GetBalance ===
         await page.setRequestInterception(true);
-        page.on('request', (req) => {
+        requestHandler = (req) => {
             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
                 console.log('[LOGIN] ✅ Token captured from GetBalance request!');
             }
-            req.continue();
-        });
+            req.continue().catch(() => {});
+        };
+        page.on('request', requestHandler);
 
         await page.goto('https://bdgwin901.com/#/login', { waitUntil: 'domcontentloaded', timeout: 90000 });
         await page.waitForSelector('input[type="text"], input[type="tel"], input[placeholder*="Phone"], input', { timeout: 30000 });
@@ -531,7 +553,9 @@ async function autoLogin(userId, chatId, silent = false) {
         await logBoth(chatId, `❌ Login Error for user ${userId}: ${err.message}`, true);
         return false;
     } finally {
-        if (browser) await browser.close();
+        try { if (page && requestHandler) page.off("request", requestHandler); } catch {}
+        try { if (page && !page.isClosed()) await page.close(); } catch {}
+        try { if (browser) await browser.close(); } catch {}
     }
 }
 
@@ -825,11 +849,15 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
     const numberKey = "L" + st.numberLevel;
     st.sizeLevelHistory[sizeKey] = (st.sizeLevelHistory[sizeKey] || 0) + 1;
     st.numberLevelHistory[numberKey] = (st.numberLevelHistory[numberKey] || 0) + 1;
-    if (sizeWon) st.sizeLevel = 1;
-    else st.sizeLevel = st.sizeLevel >= cfg.maxLvl ? 1 : st.sizeLevel + 1;
-    if (numberWon) st.numberLevel = 1;
-    else st.numberLevel = st.numberLevel >= cfg.maxLvl ? 1 : st.numberLevel + 1;
-    st.level = Math.max(st.sizeLevel, st.numberLevel);
+    if (sizeWon || numberWon) {
+        st.sizeLevel = 1;
+        st.numberLevel = 1;
+        st.level = 1;
+    } else {
+        st.sizeLevel = st.sizeLevel >= cfg.maxLvl ? 1 : st.sizeLevel + 1;
+        st.numberLevel = st.numberLevel >= cfg.maxLvl ? 1 : st.numberLevel + 1;
+        st.level = Math.max(st.sizeLevel, st.numberLevel);
+    }
 }
 
 function pickOneEachSide(list) {
@@ -1028,6 +1056,11 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     }
 }
 
+function levelMapText(map) {
+    const entries = Object.entries(map || {}).filter(([,v]) => Number(v) > 0).sort((a,b) => Number(a[0].slice(1)) - Number(b[0].slice(1)));
+    return entries.length ? entries.map(([level,count]) => level + ":" + count).join(" | ") : "None";
+}
+
 function getStatus(userId) {
     initState(userId);
     const state = userStates[userId];
@@ -1079,7 +1112,7 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
     if(pt.lossStreak > pt.maxL) pt.maxL = pt.lossStreak;
 
     if(betLevel < cfg.maxLvl){
-        const next = cfg.customBets[st.level-1] || (cfg.baseBet * MULT[st.level-1]);
+        const next = cfg.mode === "COMBINED" ? `Size ₹${getSequenceAmount(userId, st.sizeLevel, "size")} / Number ₹${getSequenceAmount(userId, st.numberLevel, "number")}` : (cfg.customBets[st.level-1] || (cfg.baseBet * MULT[st.level-1]));
         await send(chatId,
 "╔══════════════════════════╗\n"+
 "║  ❌ LOSS                 ║\n"+
@@ -1122,7 +1155,10 @@ function parseItem(item) {
 }
 
 async function runPredict(userId, chatId) {
-    if(!running[userId]) return;
+    const runKey = String(userId);
+    if (runInFlight.has(runKey)) return;
+    runInFlight.add(runKey);
+    if(!running[userId]) { runInFlight.delete(runKey); return; }
     initUser(userId);
     const state = userStates[userId];
     const st = autobetState[userId];
@@ -1140,21 +1176,22 @@ async function runPredict(userId, chatId) {
     }
 
     const list = await fetchList();
-    if(!list) { scheduleRun(userId, chatId, 15000); return; }
+    if(!list) { scheduleRun(userId, chatId, 15000); runInFlight.delete(runKey); return; }
 
     const next = latestSitePrediction?.issueNumber || (BigInt(list[0].issueNumber)+1n).toString();
-    if (!/^\d{8,}$/.test(String(next))) { scheduleRun(userId, chatId, 5000); return; }
-    if(sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 2000); return; }
+    if (!/^\d{8,}$/.test(String(next))) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
+    if(sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 2000); runInFlight.delete(runKey); return; }
     sentPeriods[userId].add(next);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
         sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
     }
 
     const signal = decidePrediction(list, st.level, userId);
-    if(!signal) { scheduleRun(userId, chatId, 5000); return; }
+    if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip) {
         await send(chatId, "⏭ SKIP: 3-result alternating pattern detected\nNo bet for period " + next.slice(-6));
         scheduleRun(userId, chatId, 15000);
+        runInFlight.delete(runKey);
         return;
     }
 
@@ -1213,6 +1250,7 @@ waitLine+"\n"+
     // Pass the signal bets separately so WATCH mode can evaluate predictions even when AutoBet is OFF.
     const predictedBets = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
     checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
+    runInFlight.delete(runKey);
 }
 
 // ============================================================
@@ -1220,8 +1258,10 @@ waitLine+"\n"+
 // ============================================================
 async function checkResult(userId, chatId, target, predicted, predType, placedBets, predictedBets = []) {
     const timerKey = String(userId);
+    if (resultCheckInFlight.has(timerKey)) return;
+    resultCheckInFlight.add(timerKey);
     const previousTimer = resultCheckTimers.get(timerKey);
-    if (previousTimer) clearInterval(previousTimer);
+    if (previousTimer) clearTimeout(previousTimer);
     let tries = 0;
     const cfg = autobetCfg[userId];
     const st = autobetState[userId];
@@ -1231,16 +1271,18 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         if (!running[userId]) {
             clearInterval(iv);
             if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
+            resultCheckInFlight.delete(timerKey);
             return;
         }
         if (++tries > 25) {
             clearInterval(iv);
             if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
+            resultCheckInFlight.delete(timerKey);
             await logBoth(chatId, "⏱ Timeout — checking next period...");
             scheduleRun(userId, chatId, 15000);
             return;
         }
-        const list = await fetchList(); if (!list) return;
+        const list = await fetchList(); if (!list) { resultCheckInFlight.delete(timerKey); scheduleRun(userId, chatId, 10000); return; }
         if (BigInt(list[0].issueNumber) < BigInt(target)) return;
         clearInterval(iv);
         if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
@@ -1264,6 +1306,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             ? Number(b.val) === num
             : b.type === "SIZE" && b.val === actualSize);
         const betLevel = st.level;
+        const sizeBetLevel = st.sizeLevel;
+        const numberBetLevel = st.numberLevel;
         if (betPlaced) {
             const key = "L" + betLevel;
             st.levelHistory[key] = (st.levelHistory[key] || 0) + 1;
@@ -1275,6 +1319,14 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         else updateAfterResult(userId, win, actualSize, betPlaced);
 
         const s = stats[userId];
+        if (betPlaced) {
+            if (isCombinedBet) {
+                if (sizeMatched) s.sizeLevelWins["L" + sizeBetLevel] = (s.sizeLevelWins["L" + sizeBetLevel] || 0) + 1;
+                if (numberMatched) s.numberLevelWins["L" + numberBetLevel] = (s.numberLevelWins["L" + numberBetLevel] || 0) + 1;
+            } else if (win) {
+                s.levelWins["L" + betLevel] = (s.levelWins["L" + betLevel] || 0) + 1;
+            }
+        }
         s.total++;
         if (win) {
             s.win++; s.winStreak++; s.lossStreak = 0;
@@ -1406,6 +1458,7 @@ waitLine+"\n"+
 (cfg.mode === "COMBINED" ? "Size L"+st.sizeLevel+" | Number L"+st.numberLevel+"\n" : "Current  : L"+st.level+"\n")+
 "Last Win : "+(st.lastWinLevel?"L"+st.lastWinLevel+" ("+(st.lastWinMode||cfg.mode)+")":"None")+"\n"+
 (cfg.mode === "COMBINED" ? "Size Hist: "+(Object.entries(st.sizeLevelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\nNumber Hist: "+(Object.entries(st.numberLevelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n" : "History  : "+(Object.entries(st.levelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n")+
+"Wins Lvl : "+(cfg.mode === "COMBINED" ? "Size "+levelMapText(stats[userId].sizeLevelWins)+" | Number "+levelMapText(stats[userId].numberLevelWins) : levelMapText(stats[userId].levelWins))+"\n"+
 "P&L      : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n\n"+
 "Mart: ₹"+amounts.join("→₹")
     );
@@ -1430,8 +1483,7 @@ const autobetMenu={keyboard:[
     ["🎯 Set Profit Target", "⏳ Set Section Delay"],
     ["🔢 Set Watch Losses","📊 AutoBet Status"],
     ["🎮 Mode: Big/Small","🔢 Mode: Number"],
-    ["🔀 Mode: BigSmall+Number","📝 Set Custom Bets"],
-    ["💵 Set Size Bets","🔢 Set Number Bets"],
+    ["🔀 Mode: BigSmall+Number","🔀 Customize Bet"],
     ["🔙 Back"]
 ],resize_keyboard:true};
 
@@ -1457,6 +1509,7 @@ function recoverPolling(err) {
     }, 5000);
 }
 function startBot(){
+    if (!BOT_TOKEN) throw new Error("BOT_TOKEN environment variable is required");
     if(bot){try{bot.stopPolling();}catch(e){}}
     bot=new TelegramBot(BOT_TOKEN,{polling:{interval:1000,autoStart:true,params:{timeout:30}}});
     bot.on("polling_error",err=>{
@@ -1597,6 +1650,7 @@ function addHandlers(){
                     report += `📈 Profit: ₹${pnlStr}\n`;
                     report += `🎮 Level: L${st.level}\n`;
                     report += `🧾 History: ${Object.entries(st.levelHistory || {}).map(([level, count]) => level + ":" + count).join(" | ") || "None"}\n`;
+                    report += `🏆 Wins by Level: ${st && autobetCfg[uid].mode === "COMBINED" ? "Size " + levelMapText(stats[uid].sizeLevelWins) + " | Number " + levelMapText(stats[uid].numberLevelWins) : levelMapText(stats[uid].levelWins)}\n`;
                     report += `📊 Win/Loss: ${pt.wins}W / ${pt.losses}L\n`;
                     report += `------------------------\n`;
                 });
@@ -1722,9 +1776,7 @@ function addHandlers(){
                 // --- SETTINGS TRIGGERS ---
         if(text==="🎯 Set Profit Target"){userAction[id]={action:"settarget"};return send(id,"Enter target profit (Min ₹10):");}
         if(text==="⏳ Set Section Delay"){userAction[id]={action:"setdelay"};return send(id,"Enter restart delay in MINUTES (e.g. 30):");}
-        if(text==="📝 Set Custom Bets"){userAction[id]={action:"setcustom"};return send(id,"📝 Enter shared Custom Bet Sequence (e.g. 1,4,7,9):");}
-        if(text==="💵 Set Size Bets"){userAction[id]={action:"setcustomsize"};return send(id,"💵 Enter Big/Small bet sequence (e.g. 1,4,7,9):");}
-        if(text==="🔢 Set Number Bets"){userAction[id]={action:"setcustomnumber"};return send(id,"🔢 Enter Number bet sequence (e.g. 1,4,7,9):");}
+        if(text==="🔀 Customize Bet"){userAction[id]={action:"setcombinedcustom",step:"size"};return send(id,"Enter BIG/SMALL level amounts (example: 1,2,4,8):");}
 if(text==="🔢 Set Watch Losses"){
     userAction[id]={action:"setwloss"};
     return send(id,"Enter watch loss count (e.g. 3):");
@@ -1748,6 +1800,19 @@ if(text==="🔢 Set Watch Losses"){
                 autobetCfg[id].restartDelay = v;
                 delete userAction[id];
                 return send(id, "✅ Section delay set to "+v+" minutes", {reply_markup: autobetMenu});
+            }
+            else if(s.action === "setcombinedcustom"){
+                const vals = text.split(/[, ]+/).map(v => parseInt(v.trim())).filter(v => Number.isInteger(v) && v > 0);
+                if(vals.length === 0) return send(id, "❌ Format error! Use: 1,2,4,8");
+                if(s.step === "size"){
+                    autobetCfg[id].customSizeBets = vals;
+                    userAction[id] = {action:"setcombinedcustom", step:"number", sizeVals:vals};
+                    return send(id, "✅ Size levels saved. Now enter NUMBER level amounts (example: 1,9,81,729):");
+                }
+                autobetCfg[id].customNumberBets = vals;
+                autobetCfg[id].maxLvl = Math.max((userAction[id].sizeVals || []).length, vals.length);
+                delete userAction[id];
+                return send(id, "✅ Combined custom bets updated!\nSize: ₹"+autobetCfg[id].customSizeBets.join(" → ₹")+"\nNumber: ₹"+vals.join(" → ₹")+"\nAny win resets both to L1.", {reply_markup: autobetMenu});
             }
             else if(s.action === "setcustom" || s.action === "setcustomsize" || s.action === "setcustomnumber"){
                 const vals = text.split(/[, ]+/).map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
@@ -1778,7 +1843,7 @@ if(text==="🔢 Set Watch Losses"){
 
             clearUserTimers(id);
             running[id]=true;sentPeriods[id]=new Set();
-            autobetState[id]={...(autobetState[id]||{}),level:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
+            autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
 
             // Load previous B/S history from API
             const prevList = await fetchList();
