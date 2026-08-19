@@ -249,29 +249,36 @@ function initUser(id) {
         baseBet:1, 
         maxLvl:5, 
         enabled:false,
-        dryRun:true,
         mode:"SIZE", // SIZE, NUMBER, or COMBINED
         customBets:[1,3,9,27,81],
-        customSizeBets:[1,3,9,27,81],
-        customNumberBets:[1,3,9,27,81],
+        customSizeBets:[1,2,4,8,16],
+        customNumberBets:[1,9,81,729,6561],
         targetProfit: 1000,    // NEW: Profit target set panna
         restartDelay: 1        // NEW: Restart time (hours) set panna
     };
     if (autobetCfg[id].mode !== "SIZE" && autobetCfg[id].mode !== "NUMBER" && autobetCfg[id].mode !== "COMBINED") autobetCfg[id].mode = "SIZE";
     if (!Array.isArray(autobetCfg[id].customBets) || !autobetCfg[id].customBets.length) autobetCfg[id].customBets = [1,3,9,27,81];
-    if (!Array.isArray(autobetCfg[id].customSizeBets) || !autobetCfg[id].customSizeBets.length) autobetCfg[id].customSizeBets = [...autobetCfg[id].customBets];
-    if (!Array.isArray(autobetCfg[id].customNumberBets) || !autobetCfg[id].customNumberBets.length) autobetCfg[id].customNumberBets = [...autobetCfg[id].customBets];
+    if (!Array.isArray(autobetCfg[id].customSizeBets) || !autobetCfg[id].customSizeBets.length) autobetCfg[id].customSizeBets = [1,2,4,8,16];
+    if (!Array.isArray(autobetCfg[id].customNumberBets) || !autobetCfg[id].customNumberBets.length) autobetCfg[id].customNumberBets = [1,9,81,729,6561];
     if (!autobetState[id]) autobetState[id] = { 
         level:1,
+        sizeLevel:1,
+        numberLevel:1,
         consecutiveLoss:0,
         inMart:false,
         lastWinLevel:null,
         lastWinMode:null,
-        isWaiting: false,      // NEW: Bot waiting-la irukka-nu check panna
-        nextStartTime: null,   // NEW: Thirumba eppo start aakanum-nu store panna
-        levelHistory: {}        // bounded count map: L1:26, L2:4, ...
+        isWaiting: false,
+        nextStartTime: null,
+        levelHistory: {},
+        sizeLevelHistory: {},
+        numberLevelHistory: {}
     };
     if (!autobetState[id].levelHistory || typeof autobetState[id].levelHistory !== "object") autobetState[id].levelHistory = {};
+    if (!Number.isInteger(autobetState[id].sizeLevel) || autobetState[id].sizeLevel < 1) autobetState[id].sizeLevel = autobetState[id].level || 1;
+    if (!Number.isInteger(autobetState[id].numberLevel) || autobetState[id].numberLevel < 1) autobetState[id].numberLevel = autobetState[id].level || 1;
+    if (!autobetState[id].sizeLevelHistory || typeof autobetState[id].sizeLevelHistory !== "object") autobetState[id].sizeLevelHistory = {};
+    if (!autobetState[id].numberLevelHistory || typeof autobetState[id].numberLevelHistory !== "object") autobetState[id].numberLevelHistory = {};
     if (!profitTrack[id])  profitTrack[id]  = { totalBets:0, wins:0, losses:0, pnl:0, winStreak:0, lossStreak:0, maxW:0, maxL:0, totalBetAmount: 0 };
 }
 
@@ -406,46 +413,74 @@ async function fetchCaptcha() {
 //  AUTO LOGIN (PUPPETEER VERSION)
 // ============================================================
 
-
 async function autoLogin(userId, chatId, silent = false) {
-
-
     const creds = userCreds[userId] || {};
-    const { phone, pass } = creds;
+    const { phone, pass } = creds; // Or change 'pass' to 'password' here
 
     if (!phone || !pass) {
         await logBoth(chatId, `[AUTO LOGIN] User ${userId} has no phone or password set.`);
-
         return false;
     }
 
     let browser;
+    let capturedToken = null; // Declare this outside the try block
+
     try {
         browser = await puppeteer.launch({
             headless: true, 
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
         });
+        
         const page = await browser.newPage();
-        await page.setDefaultNavigationTimeout(90000); 
+        
+        // === ANTI-DETECTION ===
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        });
+        
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-        let capturedToken = null;
+        await page.setViewport({ width: 1280, height: 800 });
+        
+        // === TOKEN CAPTURE FROM GetBalance ===
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
             }
             req.continue();
         });
 
         await page.goto('https://bdgwin901.com/#/login', { waitUntil: 'domcontentloaded', timeout: 90000 });
-        await page.waitForSelector('input', { timeout: 30000 });
-        const inputs = await page.$$('input');
-        if (inputs.length < 2) throw new Error("Login inputs not found");
-
-        await inputs[0].type(phone, { delay: 50 });
-        await inputs[1].type(pass, { delay: 50 });
+        await page.waitForSelector('input[type="text"], input[type="tel"], input[placeholder*="Phone"], input', { timeout: 30000 });
+        await sleep(1000);
         
+        // Phone number input field
+        const phoneInput = await page.$('input[placeholder*="number"], input[type="tel"], .van-field__control');
+        if (phoneInput) {
+            await phoneInput.click({ clickCount: 3 });
+            await phoneInput.press('Backspace');
+            await phoneInput.type(phone, { delay: 50 });
+        } else {
+            const inputs = await page.$$('input');
+            await inputs[1].type(phone, { delay: 50 });
+        }
+
+        await sleep(500);
+
+        // Password input field
+        const passwordInput = await page.$('input[type="password"]');
+        if (passwordInput) {
+            await passwordInput.type(pass, { delay: 50 });
+        } else {
+            const inputs = await page.$$('input');
+            await inputs[2].type(pass, { delay: 50 });
+        }
+
+        // Click Login button
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const loginBtn = btns.find(b => b.innerText.includes('Log in') || b.innerText.includes('Login'));
@@ -485,7 +520,6 @@ async function autoLogin(userId, chatId, silent = false) {
         }
 
         if (capturedToken) {
-            // Success: Update token only when captured
             userTokens[userId] = capturedToken;
             await logBoth(chatId, `✅ [SUCCESS] Token captured successfully for user ${userId}!`);
             return true;
@@ -498,7 +532,6 @@ async function autoLogin(userId, chatId, silent = false) {
         return false;
     } finally {
         if (browser) await browser.close();
-
     }
 }
 
@@ -547,10 +580,6 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
     if (predType === "COLOR") bc = prediction === "RED" ? "Color_Red" : "Color_Green";
 
     console.log(`[BET] ${bc} ₹${betMult} L${level} for Period: ${period}`);
-    if (cfg.dryRun !== false) {
-        console.log(`[DRY-RUN] Skipping API call: ${bc} ₹${betMult} L${level} Period ${period}`);
-        return { ok:true, dryRun:true, amt:betMult, bc };
-    }
 
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -704,7 +733,8 @@ function initState(userId) {
             normalWinsIn20: 0,       
             recoveryWinsIn20: 0,
             lastPredictionWasLoss: false,
-            consecutivePatternLoss: 0 // 🔥 தொடர்ந்து வரும் லாஸை கணக்கிட
+            consecutivePatternLoss: 0, // 🔥 தொடர்ந்து வரும் லாஸை கணக்கிட
+            skipCooldown: 0 // consume alternating-pattern skip for one period only
         };
     } else {
         if (!userStates[userId].historyModes) userStates[userId].historyModes = [];
@@ -714,6 +744,7 @@ function initState(userId) {
         if (userStates[userId].recoveryWinsIn20 === undefined) userStates[userId].recoveryWinsIn20 = 0;
         if (userStates[userId].lastPredictionWasLoss === undefined) userStates[userId].lastPredictionWasLoss = false;
         if (userStates[userId].consecutivePatternLoss === undefined) userStates[userId].consecutivePatternLoss = 0;
+        if (userStates[userId].skipCooldown === undefined) userStates[userId].skipCooldown = 0;
     }
 }
 
@@ -750,6 +781,55 @@ function getSequenceAmount(userId, level, kind = "default") {
         ? (kind === "number" ? cfg.customNumberBets : cfg.customSizeBets)
         : cfg.customBets;
     return Number(seq?.[level - 1] ?? (cfg.baseBet * (MULT[level - 1] || 1)));
+}
+
+// Combined mode uses independent progression: category advances 2x, numbers advance 9x.
+// The returned amounts are then hedged so a category win OR either exact number win
+// remains positive after the other losing stakes are deducted.
+function getCombinedBetAmounts(userId, sizeLevel, numberLevel) {
+    const cfg = autobetCfg[userId] || {};
+    const base = Math.max(1, Number(cfg.baseBet) || 1);
+    const sizeRaw = Number(cfg.customSizeBets?.[sizeLevel - 1] ?? (base * Math.pow(2, Math.max(0, sizeLevel - 1))));
+    const numberRaw = Number(cfg.customNumberBets?.[numberLevel - 1] ?? (base * Math.pow(9, Math.max(0, numberLevel - 1))));
+    // WinGo-style conservative net assumptions: category net +0.98x, number net +8x.
+    let numberEach = Math.max(1, numberRaw);
+    let sizeAmount = Math.max(1, sizeRaw);
+    for (let i = 0; i < 4; i++) {
+        numberEach = Math.max(numberEach, Math.ceil((sizeAmount + numberEach) / 8) + 1);
+        sizeAmount = Math.max(sizeAmount, Math.ceil((2 * numberEach) / 0.98) + 1);
+    }
+    return { size: sizeAmount, number: numberEach };
+}
+
+function combinedSettlement(bets, actualSize, actualNumber) {
+    const sizeAmount = bets.filter(b => b.type === "SIZE").reduce((n, b) => n + Number(b.amt || 0), 0);
+    const numberBets = bets.filter(b => b.type === "NUMBER");
+    const numberAmount = numberBets.reduce((n, b) => n + Number(b.amt || 0), 0);
+    const total = sizeAmount + numberAmount;
+    const sizeWon = bets.some(b => b.type === "SIZE" && b.val === actualSize);
+    const numberWon = numberBets.some(b => Number(b.val) === Number(actualNumber));
+    if (sizeWon) return { won: true, pnl: sizeAmount * 0.98 - numberAmount, reason: "CATEGORY" };
+    if (numberWon) {
+        const winning = numberBets.filter(b => Number(b.val) === Number(actualNumber)).reduce((n, b) => n + Number(b.amt || 0), 0);
+        return { won: true, pnl: winning * 8 - (total - winning), reason: "NUMBER" };
+    }
+    return { won: false, pnl: -total, reason: "NONE" };
+}
+
+function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
+    initUser(userId);
+    const st = autobetState[userId];
+    const cfg = autobetCfg[userId] || {};
+    if (!betPlaced || cfg.mode !== "COMBINED") return;
+    const sizeKey = "L" + st.sizeLevel;
+    const numberKey = "L" + st.numberLevel;
+    st.sizeLevelHistory[sizeKey] = (st.sizeLevelHistory[sizeKey] || 0) + 1;
+    st.numberLevelHistory[numberKey] = (st.numberLevelHistory[numberKey] || 0) + 1;
+    if (sizeWon) st.sizeLevel = 1;
+    else st.sizeLevel = st.sizeLevel >= cfg.maxLvl ? 1 : st.sizeLevel + 1;
+    if (numberWon) st.numberLevel = 1;
+    else st.numberLevel = st.numberLevel >= cfg.maxLvl ? 1 : st.numberLevel + 1;
+    st.level = Math.max(st.sizeLevel, st.numberLevel);
 }
 
 function pickOneEachSide(list) {
@@ -854,9 +934,11 @@ function decidePrediction(list, currentLevel, userId) {
     }
 
     const betMode = autobetCfg[userId]?.mode || "SIZE";
-    if (engine.skip) {
+    if (engine.skip && state.skipCooldown === 0) {
+        state.skipCooldown = 1;
         return { skip: true, type: "SKIP", val: null, pat: "3P-SKIP", reason: "3-result alternating pattern" };
     }
+    if (state.skipCooldown > 0) state.skipCooldown = 0;
     if (betMode === "NUMBER") {
         return { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER",
             bets: [{ type: "NUMBER", val: 5, kind: "number" }] };
@@ -955,11 +1037,11 @@ function getStatus(userId) {
 // ============================================================
 // 2. handleWin - UI & Stats
 // ============================================================
-async function handleWin(userId, chatId, actual, num, betLevel, bets = []) {
+async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settlement = null) {
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
-    const profit = amt * 0.98;
+    const profit = settlement ? settlement.pnl : amt * 0.98;
     
     pt.totalBets++; pt.wins++; pt.pnl += profit; 
     pt.totalBetAmount = (pt.totalBetAmount || 0) + amt;
@@ -985,13 +1067,13 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = []) {
 // ============================================================
 // 3. handleLoss - UI & Stats
 // ============================================================
-async function handleLoss(userId, chatId, actual, num, betLevel, bets = []) {
+async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], settlement = null) {
     const st = autobetState[userId];
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
     
-    pt.totalBets++; pt.losses++; pt.pnl -= amt; 
+    pt.totalBets++; pt.losses++; pt.pnl += settlement ? settlement.pnl : -amt; 
     pt.totalBetAmount = (pt.totalBetAmount || 0) + amt;
     pt.lossStreak++; pt.winStreak = 0;
     if(pt.lossStreak > pt.maxL) pt.maxL = pt.lossStreak;
@@ -1113,24 +1195,30 @@ waitLine+"\n"+
     let placedBets = [];
     if (canBet) {
         const specs = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
+        const combinedAmounts = cfg.mode === "COMBINED" ? getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel) : null;
         for (const spec of specs) {
-            const amount = getSequenceAmount(userId, st.level, spec.kind);
-            const result = await placeBet(userId, chatId, next, spec.val, spec.type, st.level, amount);
+            const amount = cfg.mode === "COMBINED"
+                ? (spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size)
+                : getSequenceAmount(userId, st.level, spec.kind);
+            const levelForBet = cfg.mode === "COMBINED" ? (spec.kind === "number" ? st.numberLevel : st.sizeLevel) : st.level;
+            const result = await placeBet(userId, chatId, next, spec.val, spec.type, levelForBet, amount);
             if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
             else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
         }
         if (placedBets.length) {
-            await send(chatId, (cfg.dryRun ? "🧪 SIMULATED: " : "✅ Bets Success: ") + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
+            await send(chatId, "✅ Bets Success: " + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
         }
     }
 
-    checkResult(userId, chatId, next, signal.val, signal.type, placedBets);
+    // Pass the signal bets separately so WATCH mode can evaluate predictions even when AutoBet is OFF.
+    const predictedBets = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
+    checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
 }
 
 // ============================================================
 // RESULT CHECKER
 // ============================================================
-async function checkResult(userId, chatId, target, predicted, predType, placedBets) {
+async function checkResult(userId, chatId, target, predicted, predType, placedBets, predictedBets = []) {
     const timerKey = String(userId);
     const previousTimer = resultCheckTimers.get(timerKey);
     if (previousTimer) clearInterval(previousTimer);
@@ -1165,8 +1253,14 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
 
         const bets = Array.isArray(placedBets) ? placedBets : [];
         const betPlaced = bets.length > 0;
-        // Color is intentionally ignored. Only exact number and Big/Small bets can win.
-        const win = bets.some(b => b.type === "NUMBER"
+        // In WATCH mode, evaluate the original signal because no placed-bets array exists.
+        // Colors are ignored; a category OR exact-number match is a WIN.
+        const evaluationBets = betPlaced ? bets : (Array.isArray(predictedBets) ? predictedBets : []);
+        const sizeMatched = evaluationBets.some(b => b.type === "SIZE" && b.val === actualSize);
+        const numberMatched = evaluationBets.some(b => b.type === "NUMBER" && Number(b.val) === num);
+        const isCombinedBet = evaluationBets.some(b => b.type === "SIZE") && evaluationBets.some(b => b.type === "NUMBER");
+        const settlement = betPlaced && isCombinedBet ? combinedSettlement(bets, actualSize, num) : null;
+        const win = settlement ? settlement.won : evaluationBets.some(b => b.type === "NUMBER"
             ? Number(b.val) === num
             : b.type === "SIZE" && b.val === actualSize);
         const betLevel = st.level;
@@ -1177,7 +1271,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             while (keys.length > MAX_LEVEL_HISTORY) delete st.levelHistory[keys.shift()];
         }
 
-        updateAfterResult(userId, win, actualSize, betPlaced);
+        if (isCombinedBet) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
+        else updateAfterResult(userId, win, actualSize, betPlaced);
 
         const s = stats[userId];
         s.total++;
@@ -1190,8 +1285,15 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         }
 
         if (betPlaced) {
-            if (win) await handleWin(userId, chatId, actualSize, num, betLevel, bets);
-            else await handleLoss(userId, chatId, actualSize, num, betLevel, bets);
+            if (win && settlement) {
+                await handleWin(userId, chatId, actualSize, num, betLevel, bets, settlement);
+            } else if (win) {
+                await handleWin(userId, chatId, actualSize, num, betLevel, bets);
+            } else if (settlement) {
+                await handleLoss(userId, chatId, actualSize, num, betLevel, bets, settlement);
+            } else {
+                await handleLoss(userId, chatId, actualSize, num, betLevel, bets);
+            }
 
             const targetProfit = Number(cfg.targetProfit) || 1000;
             if (pt.pnl >= targetProfit) {
@@ -1291,7 +1393,6 @@ async function autobetStatus(chatId, userId) {
 "Token    : "+(token.length>20?"✅":"❌")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n"+
 "Mode     : "+modeLabel(cfg.mode)+"\n"+
-"Dry-run  : "+(cfg.dryRun?"✅ ON (no real bet)":"❌ OFF")+"\n"+
 "Size Bets: ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
 "Num Bets : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
@@ -1302,9 +1403,9 @@ async function autobetStatus(chatId, userId) {
 "Section Delay: "+cfg.restartDelay+" mins"+ // Hours-la irunthu Minutes-ku mathi irukken
 waitLine+"\n"+
 "In Mart  : "+(st.inMart?"YES":"NO")+"\n"+
-"Current  : L"+st.level+"\n"+
+(cfg.mode === "COMBINED" ? "Size L"+st.sizeLevel+" | Number L"+st.numberLevel+"\n" : "Current  : L"+st.level+"\n")+
 "Last Win : "+(st.lastWinLevel?"L"+st.lastWinLevel+" ("+(st.lastWinMode||cfg.mode)+")":"None")+"\n"+
-"History  : "+(Object.entries(st.levelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n"+
+(cfg.mode === "COMBINED" ? "Size Hist: "+(Object.entries(st.sizeLevelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\nNumber Hist: "+(Object.entries(st.numberLevelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n" : "History  : "+(Object.entries(st.levelHistory||{}).map(([level,count]) => level+":"+count).join(" | ") || "None")+"\n")+
 "P&L      : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n\n"+
 "Mart: ₹"+amounts.join("→₹")
     );
@@ -1331,7 +1432,6 @@ const autobetMenu={keyboard:[
     ["🎮 Mode: Big/Small","🔢 Mode: Number"],
     ["🔀 Mode: BigSmall+Number","📝 Set Custom Bets"],
     ["💵 Set Size Bets","🔢 Set Number Bets"],
-    ["🧪 Dry-run: ON/OFF"],
     ["🔙 Back"]
 ],resize_keyboard:true};
 
@@ -1574,7 +1674,6 @@ function addHandlers(){
 "Token    : "+(getToken(id).length>20?"✅ SET":"❌ MISSING")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n"+
 "Mode     : "+modeLabel(cfg.mode)+"\n"+
-"Dry-run  : "+(cfg.dryRun?"✅ ON (no real bet)":"❌ OFF")+"\n"+
 "Size Seq : ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
 "Num Seq  : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
@@ -1606,10 +1705,6 @@ function addHandlers(){
         if(text==="👀 Watch Mode ON") {autobetCfg[id].watch=true;return send(id,"👀 Watch ON — "+autobetCfg[id].watchLoss+" losses → bet");}
         if(text==="👀 Watch Mode OFF"){autobetCfg[id].watch=false;return send(id,"👀 Watch OFF — Direct bet!");}
                         // --- CORRECTED SETTINGS HANDLERS ---
-        if(text==="🧪 Dry-run: ON/OFF"){
-            autobetCfg[id].dryRun = !autobetCfg[id].dryRun;
-            return send(id, autobetCfg[id].dryRun ? "🧪 Dry-run ON — API bet calls disabled." : "⚠️ Dry-run OFF — real API calls enabled.", {reply_markup:autobetMenu});
-        }
         if(text==="🎮 Mode: Big/Small"){
             autobetCfg[id].mode="SIZE";
             return send(id,"✅ Mode set: BIG/SMALL\nCategory bet enabled.",{reply_markup:autobetMenu});
@@ -1699,7 +1794,7 @@ if(text==="🔢 Set Watch Losses"){
 
             const cfg=autobetCfg[id];
             await send(msg.chat.id,
-"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nDryRun : "+(cfg.dryRun?"ON":"OFF")+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
+"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
             );
             runPredict(id,msg.chat.id);
         }
