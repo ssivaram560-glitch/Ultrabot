@@ -185,13 +185,17 @@ function initUser(id) {
         baseBet:1, 
         maxLvl:5, 
         enabled:false, 
-        mode:"SIZE", // SIZE = Big/Small mode; NUMBER = exact-number mode
+        mode:"SIZE", // SIZE, NUMBER, or COMBINED
         customBets:[1,3,9,27,81],
+        customSizeBets:[1,3,9,27,81],
+        customNumberBets:[1,3,9,27,81],
         targetProfit: 1000,    // NEW: Profit target set panna
         restartDelay: 1        // NEW: Restart time (hours) set panna
     };
-    if (autobetCfg[id].mode !== "SIZE" && autobetCfg[id].mode !== "NUMBER") autobetCfg[id].mode = "SIZE";
+    if (autobetCfg[id].mode !== "SIZE" && autobetCfg[id].mode !== "NUMBER" && autobetCfg[id].mode !== "COMBINED") autobetCfg[id].mode = "SIZE";
     if (!Array.isArray(autobetCfg[id].customBets) || !autobetCfg[id].customBets.length) autobetCfg[id].customBets = [1,3,9,27,81];
+    if (!Array.isArray(autobetCfg[id].customSizeBets) || !autobetCfg[id].customSizeBets.length) autobetCfg[id].customSizeBets = [...autobetCfg[id].customBets];
+    if (!Array.isArray(autobetCfg[id].customNumberBets) || !autobetCfg[id].customNumberBets.length) autobetCfg[id].customNumberBets = [...autobetCfg[id].customBets];
     if (!autobetState[id]) autobetState[id] = { 
         level:1,
         consecutiveLoss:0,
@@ -339,73 +343,44 @@ async function fetchCaptcha() {
 
 
 async function autoLogin(userId, chatId, silent = false) {
+
+
     const creds = userCreds[userId] || {};
-    const { phone, pass } = creds; // Or change 'pass' to 'password' here
+    const { phone, pass } = creds;
 
     if (!phone || !pass) {
         await logBoth(chatId, `[AUTO LOGIN] User ${userId} has no phone or password set.`);
+
         return false;
     }
 
     let browser;
-    let capturedToken = null; // Declare this outside the try block
-
     try {
         browser = await puppeteer.launch({
             headless: true, 
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
         });
-        
         const page = await browser.newPage();
-        
-        // === ANTI-DETECTION ===
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            window.chrome = { runtime: {} };
-        });
-        
+        await page.setDefaultNavigationTimeout(90000); 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
-        
-        // === TOKEN CAPTURE FROM GetBalance ===
+
+        let capturedToken = null;
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
             }
             req.continue();
         });
 
         await page.goto('https://bdgwin901.com/#/login', { waitUntil: 'domcontentloaded', timeout: 90000 });
-        await page.waitForSelector('input[type="text"], input[type="tel"], input[placeholder*="Phone"], input', { timeout: 30000 });
-        await sleep(1000);
+        await page.waitForSelector('input', { timeout: 30000 });
+        const inputs = await page.$$('input');
+        if (inputs.length < 2) throw new Error("Login inputs not found");
+
+        await inputs[0].type(phone, { delay: 50 });
+        await inputs[1].type(pass, { delay: 50 });
         
-        // Phone number input field
-        const phoneInput = await page.$('input[placeholder*="number"], input[type="tel"], .van-field__control');
-        if (phoneInput) {
-            await phoneInput.click({ clickCount: 3 });
-            await phoneInput.press('Backspace');
-            await phoneInput.type(phone, { delay: 50 });
-        } else {
-            const inputs = await page.$$('input');
-            await inputs[1].type(phone, { delay: 50 });
-        }
-
-        await sleep(500);
-
-        // Password input field
-        const passwordInput = await page.$('input[type="password"]');
-        if (passwordInput) {
-            await passwordInput.type(pass, { delay: 50 });
-        } else {
-            const inputs = await page.$$('input');
-            await inputs[2].type(pass, { delay: 50 });
-        }
-
-        // Click Login button
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const loginBtn = btns.find(b => b.innerText.includes('Log in') || b.innerText.includes('Login'));
@@ -445,6 +420,7 @@ async function autoLogin(userId, chatId, silent = false) {
         }
 
         if (capturedToken) {
+            // Success: Update token only when captured
             userTokens[userId] = capturedToken;
             await logBoth(chatId, `✅ [SUCCESS] Token captured successfully for user ${userId}!`);
             return true;
@@ -457,6 +433,7 @@ async function autoLogin(userId, chatId, silent = false) {
         return false;
     } finally {
         if (browser) await browser.close();
+
     }
 }
 
@@ -480,7 +457,7 @@ async function robustLogin(userId, chatId, silent = false) {
 //  IMPROVED PLACE BET FUNCTION (Silent Retries & Multi-Request Fix)
 // ============================================================
 // ============================================================
-async function placeBet(userId, chatId, period, prediction, predType, level) {
+async function placeBet(userId, chatId, period, prediction, predType, level, amountOverride) {
     let token = getToken(userId);
     if (!token || token.length < 20) {
         console.log("[PLACE BET] Token missing or invalid, attempting autoLogin...");
@@ -493,7 +470,8 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
     }
 
     const cfg       = autobetCfg[userId];
-    const betMult   = cfg.customBets[level-1] || (cfg.baseBet * MULT[level-1]);
+    const fallbackAmount = cfg.customBets[level-1] || (cfg.baseBet * MULT[level-1]);
+    const betMult   = Number.isFinite(Number(amountOverride)) ? Number(amountOverride) : fallbackAmount;
     let bc = "";
 
     const maxRetries = 5; 
@@ -693,6 +671,58 @@ function deterministicSizePrediction(list) {
     };
 }
 
+function modeLabel(mode) {
+    return mode === "NUMBER" ? "NUMBER" : mode === "COMBINED" ? "BIG/SMALL + NUMBER" : "BIG/SMALL";
+}
+
+function getSequenceAmount(userId, level, kind = "default") {
+    const cfg = autobetCfg[userId] || {};
+    const seq = cfg.mode === "COMBINED"
+        ? (kind === "number" ? cfg.customNumberBets : cfg.customSizeBets)
+        : cfg.customBets;
+    return Number(seq?.[level - 1] ?? (cfg.baseBet * (MULT[level - 1] || 1)));
+}
+
+function pickOppositeNumbers(list, predictedSide) {
+    const pool = predictedSide === "BIG" ? [0,1,2,3,4] : [5,6,7,8,9];
+    const counts = Object.fromEntries(pool.map(n => [n, 0]));
+    for (const item of (Array.isArray(list) ? list : [])) {
+        const n = Number.parseInt(item?.number ?? item?.winNumber ?? -1, 10);
+        if (Object.prototype.hasOwnProperty.call(counts, n)) counts[n]++;
+    }
+    return pool.slice().sort((a, b) => counts[a] - counts[b] || a - b).slice(0, 2);
+}
+
+function isThreeResultSkip(list) {
+    if (!Array.isArray(list) || list.length < 3) return false;
+    const sides = list.slice(0, 3).map(item => Number.parseInt(item?.number ?? item?.winNumber ?? 0, 10) >= 5 ? "BIG" : "SMALL");
+    return (sides[0] === "BIG" && sides[1] === "SMALL" && sides[2] === "BIG") ||
+           (sides[0] === "SMALL" && sides[1] === "BIG" && sides[2] === "SMALL");
+}
+
+function htmlCorePrediction(list, state) {
+    if (!Array.isArray(list) || list.length < 3) return null;
+    const sides = list.map(item => Number.parseInt(item?.number ?? item?.winNumber ?? 0, 10) >= 5 ? "BIG" : "SMALL");
+    const latest = sides[0];
+    const opposite = latest === "BIG" ? "SMALL" : "BIG";
+    let side = null;
+    let reason = "REVERSAL";
+    let streak = 1;
+    while (streak < sides.length && sides[streak] === latest) streak++;
+    if (streak >= 5) { side = latest; reason = "5PLUS-STREAK"; }
+    if (!side && sides.length >= 7) {
+        const seven = sides.slice(0, 7);
+        if (seven.every((v, i) => i === 0 || v !== seven[i - 1])) { side = latest; reason = "7X-ALTERNATING"; }
+    }
+    if (!side) {
+        const recent = sides.slice(0, 5);
+        const bigCount = recent.filter(v => v === "BIG").length;
+        side = bigCount >= 4 ? "SMALL" : bigCount <= 1 ? "BIG" : opposite;
+        reason = "REVERSAL";
+    }
+    return { side, reason, skip: isThreeResultSkip(list), numbers: pickOppositeNumbers(list, side) };
+}
+
 function decidePrediction(list, currentLevel, userId) {
     if (!list || list.length < 7) {
         return null;
@@ -740,15 +770,10 @@ function decidePrediction(list, currentLevel, userId) {
         effectiveMode = state.mode;
     }
 
-    const formula = deterministicSizePrediction(list);
-    if (!formula) return null;
-
-    // Deterministic formula:
-    // 1st result × 4 + 3rd result × 3 + 5th result × 2 + 7th result × 1.
-    // Reduce the total to one digit; 0–4 = SMALL and 5–9 = BIG.
-    prediction = formula.prediction;
-
-    const formulaMode = effectiveMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
+    const engine = htmlCorePrediction(list, state);
+    if (!engine) return null;
+    prediction = engine.side;
+    const formulaMode = engine.reason;
 
     const currentModeChar = effectiveMode === "NORMAL" ? "N" : "R";
     if (state.historyModes[state.historyModes.length - 1] !== currentModeChar) {
@@ -757,10 +782,24 @@ function decidePrediction(list, currentLevel, userId) {
     }
 
     const betMode = autobetCfg[userId]?.mode || "SIZE";
-    // NUMBER mode intentionally ignores the formula result and always bets exact number 5.
-    return betMode === "NUMBER"
-        ? { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER", formula }
-        : { type: "SIZE", val: prediction, conf: 85, pat: formulaMode, formula };
+    if (engine.skip) {
+        return { skip: true, type: "SKIP", val: null, pat: "3P-SKIP", reason: "3-result alternating pattern" };
+    }
+    if (betMode === "NUMBER") {
+        return { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER",
+            bets: [{ type: "NUMBER", val: 5, kind: "number" }] };
+    }
+    if (betMode === "COMBINED") {
+        const oppositeNumbers = pickOppositeNumbers(list, prediction);
+        return { type: "COMBINED", val: prediction, conf: 85, pat: formulaMode + "_COMBINED",
+            bets: [
+                { type: "SIZE", val: prediction, kind: "size" },
+                { type: "NUMBER", val: oppositeNumbers[0], kind: "number" },
+                { type: "NUMBER", val: oppositeNumbers[1], kind: "number" }
+            ] };
+    }
+    return { type: "SIZE", val: prediction, conf: 85, pat: formulaMode,
+        bets: [{ type: "SIZE", val: prediction, kind: "size" }] };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
@@ -842,10 +881,10 @@ function getStatus(userId) {
 // ============================================================
 // 2. handleWin - UI & Stats
 // ============================================================
-async function handleWin(userId, chatId, actual, num, betLevel) {
+async function handleWin(userId, chatId, actual, num, betLevel, bets = []) {
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
-    const amt = cfg.customBets[betLevel-1] || (cfg.baseBet * MULT[betLevel-1]);
+    const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
     const profit = amt * 0.98;
     
     pt.totalBets++; pt.wins++; pt.pnl += profit; 
@@ -872,11 +911,11 @@ async function handleWin(userId, chatId, actual, num, betLevel) {
 // ============================================================
 // 3. handleLoss - UI & Stats
 // ============================================================
-async function handleLoss(userId, chatId, actual, num, betLevel) {
+async function handleLoss(userId, chatId, actual, num, betLevel, bets = []) {
     const st = autobetState[userId];
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
-    const amt = cfg.customBets[betLevel-1] || (cfg.baseBet * MULT[betLevel-1]);
+    const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
     
     pt.totalBets++; pt.losses++; pt.pnl -= amt; 
     pt.totalBetAmount = (pt.totalBetAmount || 0) + amt;
@@ -956,6 +995,11 @@ async function runPredict(userId, chatId) {
 
     const signal = decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); return; }
+    if (signal.skip) {
+        await send(chatId, "⏭ SKIP: 3-result alternating pattern detected\nNo bet for period " + next.slice(-6));
+        scheduleRun(userId, chatId, 8000);
+        return;
+    }
 
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
@@ -980,8 +1024,9 @@ async function runPredict(userId, chatId) {
 "║    👑 EARN WITH ME AI    ║\n"+
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
-"║ Mode    : "+(cfg.mode==="NUMBER"?"🔢 NUMBER":"🔵 BIG/SMALL")+"\n"+
-"║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL"))+"\n"+
+"║ Mode    : "+modeLabel(cfg.mode)+"\n"+
+"║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.val==="COMBINED"?"🔀 "+signal.val:""+(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL")))+"\n"+
+(cfg.mode==="COMBINED" ? "║ Opposite: "+signal.bets.filter(b=>b.type==="NUMBER").map(b=>b.val).join(", ")+"\n" : "")+
 "║ Pattern : "+patternName+"\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
@@ -990,24 +1035,27 @@ waitLine+"\n"+
         {reply_markup:{inline_keyboard:[[{text:"💰 CHECK NOW",url:REG_LINK}]]}}
     );
 
-    let betPlaced = false;
-    if (canBet) { 
-        const result = await placeBet(userId, chatId, next, signal.val, signal.type, st.level);
-        if (result && result.ok) {
-            betPlaced = true;
-            await send(chatId, "✅ Bet Success! ₹" + result.amt + " L" + st.level + "\n⏳ Checking result...");
-        } else if (result && !result.ok) {
-            await send(chatId, "❌ Bet Failed: " + (result.msg || "Unknown error"));
+    let placedBets = [];
+    if (canBet) {
+        const specs = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
+        for (const spec of specs) {
+            const amount = getSequenceAmount(userId, st.level, spec.kind);
+            const result = await placeBet(userId, chatId, next, spec.val, spec.type, st.level, amount);
+            if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
+            else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
+        }
+        if (placedBets.length) {
+            await send(chatId, "✅ Bets Success: " + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
         }
     }
 
-    checkResult(userId, chatId, next, signal.val, signal.type, betPlaced);
+    checkResult(userId, chatId, next, signal.val, signal.type, placedBets);
 }
 
 // ============================================================
 // RESULT CHECKER
 // ============================================================
-async function checkResult(userId, chatId, target, predicted, predType, betPlaced) {
+async function checkResult(userId, chatId, target, predicted, predType, placedBets) {
     const timerKey = String(userId);
     const previousTimer = resultCheckTimers.get(timerKey);
     if (previousTimer) clearInterval(previousTimer);
@@ -1041,7 +1089,9 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
         else if (predType === "NUMBER") actual = num;
         else actual = num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN";
 
-        const win = predType === "NUMBER" ? Number(predicted) === num : predicted === actual;
+        const bets = Array.isArray(placedBets) ? placedBets : [];
+        const betPlaced = bets.length > 0;
+        const win = bets.some(b => b.type === "NUMBER" ? Number(b.val) === num : b.type === "SIZE" ? b.val === actual : b.val === actual);
         const betLevel = st.level;
         if (betPlaced) {
             const key = "L" + betLevel;
@@ -1063,8 +1113,8 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
         }
 
         if (betPlaced) {
-            if (win) await handleWin(userId, chatId, actual, num, betLevel);
-            else await handleLoss(userId, chatId, actual, num, betLevel);
+            if (win) await handleWin(userId, chatId, actual, num, betLevel, bets);
+            else await handleLoss(userId, chatId, actual, num, betLevel, bets);
 
             const targetProfit = Number(cfg.targetProfit) || 1000;
             if (pt.pnl >= targetProfit) {
@@ -1163,7 +1213,9 @@ async function autobetStatus(chatId, userId) {
 "Enabled  : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
 "Token    : "+(token.length>20?"✅":"❌")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n"+
-"Mode     : "+(cfg.mode==="NUMBER"?"🔢 NUMBER":"🔵 BIG/SMALL")+"\n"+
+"Mode     : "+modeLabel(cfg.mode)+"\n"+
+"Size Bets: ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
+"Num Bets : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
 "WatchLoss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+
 "Base Bet : ₹"+cfg.baseBet+"\n"+
@@ -1199,7 +1251,9 @@ const autobetMenu={keyboard:[
     ["🎯 Set Profit Target", "⏳ Set Section Delay"],
     ["🔢 Set Watch Losses","📊 AutoBet Status"],
     ["🎮 Mode: Big/Small","🔢 Mode: Number"],
-    ["📝 Set Custom Bets","🔙 Back"]
+    ["🔀 Mode: BigSmall+Number","📝 Set Custom Bets"],
+    ["💵 Set Size Bets","🔢 Set Number Bets"],
+    ["🔙 Back"]
 ],resize_keyboard:true};
 
 // ============================================================
@@ -1440,7 +1494,9 @@ function addHandlers(){
 "Status   : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
 "Token    : "+(getToken(id).length>20?"✅ SET":"❌ MISSING")+"\n"+
 "AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n"+
-"Mode     : "+(cfg.mode==="NUMBER"?"🔢 NUMBER":"🔵 BIG/SMALL")+"\n"+
+"Mode     : "+modeLabel(cfg.mode)+"\n"+
+"Size Seq : ₹"+(cfg.customSizeBets||cfg.customBets).join(" → ₹")+"\n"+
+"Num Seq  : ₹"+(cfg.customNumberBets||cfg.customBets).join(" → ₹")+"\n"+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
 "WatchLoss: "+cfg.watchLoss+" consecutive\n"+
 "Base Bet : ₹"+cfg.baseBet+"\n"+
@@ -1472,18 +1528,24 @@ function addHandlers(){
                         // --- CORRECTED SETTINGS HANDLERS ---
         if(text==="🎮 Mode: Big/Small"){
             autobetCfg[id].mode="SIZE";
-            return send(id,"✅ Mode set: BIG/SMALL\nCurrent prediction logic + category bet will be used.",{reply_markup:autobetMenu});
+            return send(id,"✅ Mode set: BIG/SMALL\nCategory bet enabled.",{reply_markup:autobetMenu});
         }
         if(text==="🔢 Mode: Number"){
             autobetCfg[id].mode="NUMBER";
-            return send(id,"✅ Mode set: NUMBER\nLast-digit calculation + exact Num_0..Num_9 bet will be used.",{reply_markup:autobetMenu});
+            return send(id,"✅ Mode set: NUMBER\nExact Num_5 bet enabled.",{reply_markup:autobetMenu});
+        }
+        if(text==="🔀 Mode: BigSmall+Number"){
+            autobetCfg[id].mode="COMBINED";
+            return send(id,"✅ Mode set: BIG/SMALL + NUMBER\nOne category bet + two opposite-side number bets.",{reply_markup:autobetMenu});
         }
         if(text==="💰 Set Base Bet"){userAction[id]={action:"setbase"};return send(id,"Enter base bet amount (e.g. 1):");}
         if(text==="📈 Set Max Level"){userAction[id]={action:"setlvl"};return send(id,"Enter max level (1-10):");}
                 // --- SETTINGS TRIGGERS ---
         if(text==="🎯 Set Profit Target"){userAction[id]={action:"settarget"};return send(id,"Enter target profit (Min ₹10):");}
         if(text==="⏳ Set Section Delay"){userAction[id]={action:"setdelay"};return send(id,"Enter restart delay in MINUTES (e.g. 30):");}
-        if(text==="📝 Set Custom Bets"){userAction[id]={action:"setcustom"};return send(id,"📝 Enter Custom Bet Sequence (e.g. 1,4,7,9):");}
+        if(text==="📝 Set Custom Bets"){userAction[id]={action:"setcustom"};return send(id,"📝 Enter shared Custom Bet Sequence (e.g. 1,4,7,9):");}
+        if(text==="💵 Set Size Bets"){userAction[id]={action:"setcustomsize"};return send(id,"💵 Enter Big/Small bet sequence (e.g. 1,4,7,9):");}
+        if(text==="🔢 Set Number Bets"){userAction[id]={action:"setcustomnumber"};return send(id,"🔢 Enter Number bet sequence (e.g. 1,4,7,9):");}
 if(text==="🔢 Set Watch Losses"){
     userAction[id]={action:"setwloss"};
     return send(id,"Enter watch loss count (e.g. 3):");
@@ -1508,11 +1570,13 @@ if(text==="🔢 Set Watch Losses"){
                 delete userAction[id];
                 return send(id, "✅ Section delay set to "+v+" minutes", {reply_markup: autobetMenu});
             }
-            else if(s.action === "setcustom"){
+            else if(s.action === "setcustom" || s.action === "setcustomsize" || s.action === "setcustomnumber"){
                 const vals = text.split(/[, ]+/).map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
                 if(vals.length === 0) return send(id, "❌ Format error! Use: 1,4,7,9");
-                autobetCfg[id].customBets = vals;
-                autobetCfg[id].maxLvl = vals.length;
+                if (s.action === "setcustomsize") autobetCfg[id].customSizeBets = vals;
+                else if (s.action === "setcustomnumber") autobetCfg[id].customNumberBets = vals;
+                else { autobetCfg[id].customBets = vals; autobetCfg[id].customSizeBets = [...vals]; autobetCfg[id].customNumberBets = [...vals]; }
+                autobetCfg[id].maxLvl = Math.max(vals.length, autobetCfg[id].maxLvl || 1);
                 delete userAction[id];
                 return send(id, "✅ Custom Bets Updated!\nLevels: " + vals.length + "\nSequence: ₹" + vals.join(" → ₹"), {reply_markup: autobetMenu});
             }
@@ -1551,7 +1615,7 @@ if(text==="🔢 Set Watch Losses"){
 
             const cfg=autobetCfg[id];
             await send(msg.chat.id,
-"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+(cfg.mode==="NUMBER"?"NUMBER":"BIG/SMALL")+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
+"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
             );
             runPredict(id,msg.chat.id);
         }
