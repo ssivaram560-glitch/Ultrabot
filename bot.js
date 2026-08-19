@@ -147,25 +147,47 @@ async function getHiddenSitePage() {
     return hiddenPagePromise;
 }
 
-async function fetchList() {
+async function readHiddenSitePrediction() {
     try {
         const page = await getHiddenSitePage();
-        const snapshot = await page.evaluate(async () => {
-            const response = await fetch("/api/wingo-history?pageSize=20&type=1", { cache: "no-store" });
-            const json = await response.json();
-            const list = json?.data?.list || [];
-            const heading = document.querySelector(".text-5xl.md\:text-6xl.font-black");
-            const parentText = heading?.parentElement?.innerText || "";
+        return await page.evaluate(() => {
+            const heading = document.querySelector(".text-5xl.md\\:text-6xl.font-black");
+            if (!heading) return null;
+            const parentText = heading.parentElement?.innerText || "";
             const lines = parentText.split(/\n+/).map(v => v.trim()).filter(Boolean);
-            const side = heading?.textContent?.trim() || null;
             const numbers = lines.slice(1).filter(v => /^\d$/.test(v)).slice(0, 2).map(Number);
-            return { list, sitePrediction: { side, numbers, raw: parentText } };
+            const side = heading.textContent?.trim() || null;
+            if (!["BIG", "SMALL"].includes(side) || numbers.length !== 2) return null;
+            return { side, numbers, raw: parentText };
         });
-        latestSitePrediction = snapshot.sitePrediction;
-        if (Array.isArray(snapshot.list) && snapshot.list.length) return snapshot.list;
-        return [];
     } catch (error) {
-        console.error("[HIDDEN SITE ERROR]", error.message);
+        console.error("[HIDDEN SITE DOM ERROR]", error.message);
+        return null;
+    }
+}
+
+async function fetchList() {
+    try {
+        // Keep the hidden Netlify page open, but use the verified JSON source for history.
+        // This avoids parsing an HTML fallback returned by the site's /api route.
+        const response = await axios.get(DRAW_URL, {
+            headers: {
+                "Accept": "application/json, text/plain, */*",
+                "Origin": SITE_URL,
+                "Referer": SITE_URL,
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36"
+            },
+            timeout: 10000,
+            validateStatus: status => status >= 200 && status < 300
+        });
+        if (!(response.data && response.data.data && Array.isArray(response.data.data.list))) {
+            console.error("[FETCH LIST ERROR] WinGo response was not a list");
+            return null;
+        }
+        latestSitePrediction = await readHiddenSitePrediction();
+        return response.data.data.list;
+    } catch (error) {
+        console.error("[FETCH LIST ERROR]", error.message);
         return null;
     }
 }
