@@ -1206,7 +1206,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                     "║  👀 WATCH RESULT: WIN! ✅ ║\n"+
                     "╠══════════════════════════╣\n"+
                     "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
+                    "║ Result : "+actualSize+"\n"+
                     "║ Status : Correct Prediction\n"+
                     "╚══════════════════════════╝"
                 );
@@ -1217,7 +1217,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                     "║  👀 WATCH RESULT: LOSS ❌ ║\n"+
                     "╠══════════════════════════╣\n"+
                     "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
+                    "║ Result : "+actualSize+"\n"+
                     "║ Status : Incorrect Prediction\n"+
                     "╚══════════════════════════╝"
                 );
