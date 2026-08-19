@@ -7,7 +7,6 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
-// ============================================================
 const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
@@ -154,11 +153,13 @@ async function readHiddenSitePrediction() {
             const heading = document.querySelector(".text-5xl.md\\:text-6xl.font-black");
             if (!heading) return null;
             const parentText = heading.parentElement?.innerText || "";
+            const cardText = heading.parentElement?.parentElement?.innerText || parentText;
             const lines = parentText.split(/\n+/).map(v => v.trim()).filter(Boolean);
             const numbers = lines.slice(1).filter(v => /^\d$/.test(v)).slice(0, 2).map(Number);
             const side = heading.textContent?.trim() || null;
+            const m = cardText.match(/#(\d{8,})/);
             if (!["BIG", "SMALL"].includes(side) || numbers.length !== 2) return null;
-            return { side, numbers, raw: parentText };
+            return { side, numbers, issueNumber: m ? m[1] : null, raw: cardText };
         });
     } catch (error) {
         console.error("[HIDDEN SITE DOM ERROR]", error.message);
@@ -1059,7 +1060,8 @@ async function runPredict(userId, chatId) {
     const list = await fetchList();
     if(!list) { scheduleRun(userId, chatId, 15000); return; }
 
-    const next = (BigInt(list[0].issueNumber)+1n).toString();
+    const next = latestSitePrediction?.issueNumber || (BigInt(list[0].issueNumber)+1n).toString();
+    if (!/^\d{8,}$/.test(String(next))) { scheduleRun(userId, chatId, 5000); return; }
     if(sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 2000); return; }
     sentPeriods[userId].add(next);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
@@ -1155,16 +1157,18 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         clearInterval(iv);
         if (resultCheckTimers.get(timerKey) === iv) resultCheckTimers.delete(timerKey);
 
-        const res = list.find(i => i.issueNumber === target) || list[0];
-        const num = parseInt(res.number || res.winNumber || 0);
-        let actual;
-        if (predType === "SIZE") actual = num >= 5 ? "BIG" : "SMALL";
-        else if (predType === "NUMBER") actual = num;
-        else actual = num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN";
+        const res = list.find(i => String(i.issueNumber) === String(target));
+        if (!res) return; // Never evaluate a different period as a fallback.
+        const num = parseInt(res.number || res.winNumber, 10);
+        if (!Number.isFinite(num) || num < 0 || num > 9) return;
+        const actualSize = num >= 5 ? "BIG" : "SMALL";
 
         const bets = Array.isArray(placedBets) ? placedBets : [];
         const betPlaced = bets.length > 0;
-        const win = bets.some(b => b.type === "NUMBER" ? Number(b.val) === num : b.type === "SIZE" ? b.val === actual : b.val === actual);
+        // Color is intentionally ignored. Only exact number and Big/Small bets can win.
+        const win = bets.some(b => b.type === "NUMBER"
+            ? Number(b.val) === num
+            : b.type === "SIZE" && b.val === actualSize);
         const betLevel = st.level;
         if (betPlaced) {
             const key = "L" + betLevel;
@@ -1173,7 +1177,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             while (keys.length > MAX_LEVEL_HISTORY) delete st.levelHistory[keys.shift()];
         }
 
-        updateAfterResult(userId, win, actual, betPlaced);
+        updateAfterResult(userId, win, actualSize, betPlaced);
 
         const s = stats[userId];
         s.total++;
@@ -1186,8 +1190,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         }
 
         if (betPlaced) {
-            if (win) await handleWin(userId, chatId, actual, num, betLevel, bets);
-            else await handleLoss(userId, chatId, actual, num, betLevel, bets);
+            if (win) await handleWin(userId, chatId, actualSize, num, betLevel, bets);
+            else await handleLoss(userId, chatId, actualSize, num, betLevel, bets);
 
             const targetProfit = Number(cfg.targetProfit) || 1000;
             if (pt.pnl >= targetProfit) {
