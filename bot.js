@@ -183,24 +183,33 @@ async function readSitePrediction() {
         let page;
         try {
             page = await getHiddenSitePage();
-            await page.waitForSelector('.current-card .prediction, .prediction', { timeout: 12000 });
+            await page.waitForSelector('.current-card', { timeout: 12000 });
+            // The site may render a blank current card while /api/history is unavailable.
+            // Read the entire card so minor class-name/layout changes do not break parsing.
             const raw = await page.evaluate(() => {
                 const card = document.querySelector('.current-card') || document;
                 const label = card.querySelector('.label')?.textContent || "";
-                const prediction = card.querySelector('.prediction')?.textContent || "";
-                const numberText = card.querySelector('.prediction-number')?.textContent || "";
-                const issueMatch = label.match(/(?:ISSUE|PERIOD)\s*#?\s*(\d{8,})/i);
-                const sideMatch = prediction.match(/\b(BIG|SMALL)\b/i);
-                const numberMatch = numberText.match(/\b([0-9])\b/) || prediction.match(/\b(?:OR|NUMBER)\s*([0-9])\b/i);
+                const predictionNode = card.querySelector('.prediction');
+                const prediction = predictionNode?.textContent || "";
+                const numberText = card.querySelector('.prediction-number, [data-prediction-number], [data-number]')?.textContent || "";
+                const fullText = card.innerText || card.textContent || "";
+                const issueMatch = (label + " " + fullText).match(/(?:ISSUE|PERIOD)\s*#?\s*(\d{8,})/i);
+                const sideMatch = (prediction + " " + fullText).match(/\b(BIG|SMALL)\b/i);
+                const explicitNumber = numberText.match(/(?:NUMBER|NO\.?|DIGIT)?\s*[:#-]?\s*([0-9])\b/i);
+                const numberInPrediction = prediction.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i)
+                    || prediction.match(/\b([0-9])\b\s*(?:[·|:/-])?\s*(?:BIG|SMALL)\b/i)
+                    || prediction.match(/\b(?:BIG|SMALL)\b\s*(?:[·|:/-])?\s*([0-9])\b/i);
+                const numberInFull = fullText.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i);
                 return {
                     issueNumber: issueMatch?.[1] || "",
                     side: sideMatch?.[1] || "",
-                    number: numberMatch?.[1] ?? ""
+                    number: (explicitNumber || numberInPrediction || numberInFull)?.[1] ?? "",
+                    rawText: fullText.slice(0, 500)
                 };
             });
             const parsed = normalizeSitePrediction(raw);
             if (!parsed) {
-                console.warn("[SITE PREDICTION] Output unavailable or incomplete; skipping.");
+                console.warn("[SITE PREDICTION] Output unavailable or incomplete; skipping. Site card:", raw.rawText || "(blank)");
                 return null;
             }
             hiddenSiteLastUsed = Date.now();
