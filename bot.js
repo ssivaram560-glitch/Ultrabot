@@ -10,7 +10,6 @@ const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
-const ADMIN_HANDLE = "@Sivakutty1";
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
