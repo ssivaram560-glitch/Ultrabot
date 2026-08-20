@@ -6,6 +6,7 @@ const puppeteer   = require('puppeteer');
 
 // ============================================================
 //  CONFIG
+// ============================================================
 const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
@@ -73,6 +74,19 @@ let hiddenSiteLastUsed = 0;
 let hiddenSiteCloseTimer = null;
 let sitePredictionInFlight = null;
 const MAX_SENT_PERIODS = 6;
+
+function clearUserTimers(userId) {
+    const key = String(userId);
+    const nextTimer = nextRunTimers.get(key);
+    if (nextTimer) clearTimeout(nextTimer);
+    nextRunTimers.delete(key);
+
+    const resultTimer = resultCheckTimers.get(key);
+    if (resultTimer) clearTimeout(resultTimer);
+    resultCheckTimers.delete(key);
+    resultCheckInFlight.delete(key);
+    runInFlight.delete(key);
+}
 const MAX_LEVEL_HISTORY = 10;
 const HIDDEN_SITE_MAX_AGE_MS = 10 * 60 * 1000;
 const FETCH_COOLDOWN_MS = 2500;
