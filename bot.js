@@ -204,10 +204,6 @@ async function fetchList() {
             console.error("[FETCH LIST ERROR] WinGo response was not a list");
             return null;
         }
-        if (Date.now() - lastHiddenPredictionAt >= FETCH_COOLDOWN_MS || !latestSitePrediction) {
-            latestSitePrediction = await readHiddenSitePrediction();
-            lastHiddenPredictionAt = Date.now();
-        }
         return response.data.data.list;
     } catch (error) {
         console.error("[FETCH LIST ERROR]", error.message);
@@ -784,29 +780,6 @@ function initState(userId) {
     }
 }
 
-function reduceToSingleDigit(value) {
-    let n = Math.abs(Number(value)) || 0;
-    while (n >= 10) {
-        n = String(n).split("").reduce((sum, digit) => sum + Number(digit), 0);
-    }
-    return n;
-}
-
-function deterministicSizePrediction(list) {
-    if (!Array.isArray(list) || list.length < 7) return null;
-    const getNumber = (index) => Number.parseInt(list[index]?.number ?? list[index]?.winNumber ?? 0, 10) || 0;
-    const r1 = getNumber(0);
-    const r3 = getNumber(2);
-    const r5 = getNumber(4);
-    const r7 = getNumber(6);
-    const weightedTotal = (r1 * 4) + (r3 * 3) + (r5 * 2) + (r7 * 1);
-    const finalDigit = reduceToSingleDigit(weightedTotal);
-    return {
-        r1, r3, r5, r7, weightedTotal, finalDigit,
-        prediction: finalDigit <= 4 ? "SMALL" : "BIG"
-    };
-}
-
 function modeLabel(mode) {
     return mode === "NUMBER" ? "NUMBER" : mode === "COMBINED" ? "BIG/SMALL + NUMBER" : "BIG/SMALL";
 }
@@ -884,117 +857,69 @@ function pickOneEachSide(list) {
     return { big: choose(big), small: choose(small) };
 }
 
-function isThreeResultSkip(list) {
-    if (!Array.isArray(list) || list.length < 3) return false;
-    const sides = list.slice(0, 3).map(item => Number.parseInt(item?.number ?? item?.winNumber ?? 0, 10) >= 5 ? "BIG" : "SMALL");
-    return (sides[0] === "BIG" && sides[1] === "SMALL" && sides[2] === "BIG") ||
-           (sides[0] === "SMALL" && sides[1] === "BIG" && sides[2] === "SMALL");
-}
+// New engine: inspect the latest five periods and use the latest four for the
+// final same/opposite decision. The API history is newest-first.
+function recentOppositePrediction(list) {
+    if (!Array.isArray(list) || list.length < 4) return null;
 
-function htmlCorePrediction(list, state) {
-    if (!Array.isArray(list) || list.length < 3) return null;
-    const sides = list.map(item => Number.parseInt(item?.number ?? item?.winNumber ?? 0, 10) >= 5 ? "BIG" : "SMALL");
-    const latest = sides[0];
-    const opposite = latest === "BIG" ? "SMALL" : "BIG";
-    let side = null;
-    let reason = "REVERSAL";
-    let streak = 1;
-    while (streak < sides.length && sides[streak] === latest) streak++;
-    if (streak >= 5) { side = latest; reason = "5PLUS-STREAK"; }
-    if (!side && sides.length >= 7) {
-        const seven = sides.slice(0, 7);
-        if (seven.every((v, i) => i === 0 || v !== seven[i - 1])) { side = latest; reason = "7X-ALTERNATING"; }
+    const sides = list.slice(0, 5).map(item => {
+        const n = Number.parseInt(item?.number ?? item?.winNumber, 10);
+        return Number.isFinite(n) ? (n >= 5 ? "BIG" : "SMALL") : null;
+    });
+    if (sides.slice(0, 4).some(value => !value)) return null;
+
+    const latestFour = sides.slice(0, 4);
+    const latest = latestFour[0];
+    const opposite = value => value === "BIG" ? "SMALL" : "BIG";
+    const allFourSame = latestFour.every(value => value === latest);
+    const lastTwoSame = latestFour[0] === latestFour[1];
+    const bigCount = latestFour.filter(value => value === "BIG").length;
+    const dominant = bigCount >= 3 ? "BIG" : bigCount <= 1 ? "SMALL" : latest;
+
+    let prediction;
+    let reason;
+    if (allFourSame) {
+        prediction = opposite(latest);
+        reason = "LAST-4-SAME-OPPOSITE";
+    } else if (lastTwoSame) {
+        prediction = opposite(latest);
+        reason = "LAST-2-SAME-OPPOSITE";
+    } else if (bigCount === 3 || bigCount === 1) {
+        prediction = opposite(dominant);
+        reason = "LAST-4-DOMINANT-OPPOSITE";
+    } else {
+        prediction = opposite(latest);
+        reason = "LATEST-OPPOSITE";
     }
-    if (!side) {
-        const recent = sides.slice(0, 5);
-        const bigCount = recent.filter(v => v === "BIG").length;
-        side = bigCount >= 4 ? "SMALL" : bigCount <= 1 ? "BIG" : opposite;
-        reason = "REVERSAL";
-    }
-    return { side, reason, skip: isThreeResultSkip(list), numbers: pickOneEachSide(list) };
+
+    return { side: prediction, reason, history: sides, latestFour, numbers: pickOneEachSide(list) };
 }
 
 function decidePrediction(list, currentLevel, userId) {
-    if (!list || list.length < 7) {
-        return null;
-    }
+    if (!list || list.length < 4) return null;
 
     initState(userId);
-    const state = userStates[userId];
-
-    let prediction;
-    let effectiveMode = state.mode;
-
-    const patternStr = state.historyModes.join("");
-
-    // 🔥 தொடர்ந்து 4 லாஸ் வந்தால் பேட்டர்ன் Close ஆகி மோட் மாறும்
-    if (state.consecutivePatternLoss >= 4) {
-        effectiveMode = (state.mode === "NORMAL") ? "RECOVERY" : "NORMAL";
-        state.mode = effectiveMode;
-        state.consecutivePatternLoss = 0; // ரீசெட் பண்றோம்
-        state.historyModes = []; // ஹிஸ்டரியை கிளியர் பண்றோம்
-    } else if (patternStr.endsWith("NRNR")) {
-        effectiveMode = "RECOVERY"; 
-        state.mode = "RECOVERY";
-    } else if (patternStr.endsWith("RNRN")) {
-        effectiveMode = "NORMAL";   
-        state.mode = "NORMAL";
-    } else if (state.lastPredictionWasLoss) {
-        effectiveMode = (state.mode === "NORMAL") ? "RECOVERY" : "NORMAL";
-        state.mode = effectiveMode;
-    }
-
-    if (state.forcedModeQueue && state.forcedModeQueue.length > 0) {
-        const nextChar = state.forcedModeQueue[0];
-        effectiveMode = (nextChar === "R") ? "RECOVERY" : "NORMAL";
-    } else if (!state.lastPredictionWasLoss) {
-        if (state.periodCounter >= 20) {
-            if (state.recoveryWinsIn20 > state.normalWinsIn20) {
-                state.mode = "RECOVERY";
-            } else if (state.normalWinsIn20 > state.recoveryWinsIn20) {
-                state.mode = "NORMAL";
-            }
-            state.periodCounter = 0;
-            state.normalWinsIn20 = 0;
-            state.recoveryWinsIn20 = 0;
-        }
-        effectiveMode = state.mode;
-    }
-
-    const engine = htmlCorePrediction(list, state);
+    const engine = recentOppositePrediction(list);
     if (!engine) return null;
-    const siteSide = latestSitePrediction?.side === "BIG" || latestSitePrediction?.side === "SMALL" ? latestSitePrediction.side : engine.side;
-    prediction = siteSide;
-    const formulaMode = "SITE";
 
-    const currentModeChar = effectiveMode === "NORMAL" ? "N" : "R";
-    if (state.historyModes[state.historyModes.length - 1] !== currentModeChar) {
-        state.historyModes.push(currentModeChar);
-        if (state.historyModes.length > 20) state.historyModes.shift();
-    }
-
+    const prediction = engine.side;
+    const formulaMode = "LAST-5-LAST-4-OPPOSITE";
     const betMode = autobetCfg[userId]?.mode || "SIZE";
-    if (engine.skip && state.skipCooldown === 0) {
-        state.skipCooldown = 1;
-        return { skip: true, type: "SKIP", val: null, pat: "3P-SKIP", reason: "3-result alternating pattern" };
-    }
-    if (state.skipCooldown > 0) state.skipCooldown = 0;
+
     if (betMode === "NUMBER") {
-        return { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER",
+        return { type: "NUMBER", val: 5, conf: 100, pat: formulaMode + "_NUMBER", reason: engine.reason,
             bets: [{ type: "NUMBER", val: 5, kind: "number" }] };
     }
     if (betMode === "COMBINED") {
-        const siteNums = Array.isArray(latestSitePrediction?.numbers) && latestSitePrediction.numbers.length === 2
-            ? latestSitePrediction.numbers
-            : [engine.numbers.small, engine.numbers.big];
-        return { type: "COMBINED", val: prediction, conf: 85, pat: formulaMode + "_COMBINED",
+        const nums = engine.numbers;
+        return { type: "COMBINED", val: prediction, conf: 85, pat: formulaMode + "_COMBINED", reason: engine.reason,
             bets: [
                 { type: "SIZE", val: prediction, kind: "size" },
-                { type: "NUMBER", val: siteNums[0], kind: "number" },
-                { type: "NUMBER", val: siteNums[1], kind: "number" }
+                { type: "NUMBER", val: nums.small, kind: "number" },
+                { type: "NUMBER", val: nums.big, kind: "number" }
             ] };
     }
-    return { type: "SIZE", val: prediction, conf: 85, pat: formulaMode,
+    return { type: "SIZE", val: prediction, conf: 85, pat: formulaMode, reason: engine.reason,
         bets: [{ type: "SIZE", val: prediction, kind: "size" }] };
 }
 
@@ -1191,7 +1116,7 @@ async function runPredict(userId, chatId) {
     const list = await fetchList();
     if(!list) { scheduleRun(userId, chatId, 15000); runInFlight.delete(runKey); return; }
 
-    const next = latestSitePrediction?.issueNumber || (BigInt(list[0].issueNumber)+1n).toString();
+    const next = (BigInt(list[0].issueNumber) + 1n).toString();
     if (!/^\d{8,}$/.test(String(next))) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if(sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 2000); runInFlight.delete(runKey); return; }
     sentPeriods[userId].add(next);
