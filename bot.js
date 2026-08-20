@@ -7,7 +7,8 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    ="8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
+// WARNING: These credentials were shared in chat and should be rotated after deployment.
+const BOT_TOKEN    = "8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
@@ -86,6 +87,25 @@ function clearUserTimers(userId) {
     resultCheckTimers.delete(key);
     resultCheckInFlight.delete(key);
     runInFlight.delete(key);
+}
+
+function scheduleRun(userId, chatId, delayMs) {
+    const key = String(userId);
+    if (!running[userId]) return;
+    const oldTimer = nextRunTimers.get(key);
+    if (oldTimer) clearTimeout(oldTimer);
+    const safeDelay = Math.max(1000, Number(delayMs) || 10000);
+    const timer = setTimeout(() => {
+        nextRunTimers.delete(key);
+        if (running[userId]) {
+            runPredict(userId, chatId).catch(error => {
+                console.error("[RUN PREDICT ERROR]", error?.message || error);
+                if (running[userId]) scheduleRun(userId, chatId, 10000);
+            });
+        }
+    }, safeDelay);
+    if (typeof timer.unref === "function") timer.unref();
+    nextRunTimers.set(key, timer);
 }
 const MAX_LEVEL_HISTORY = 10;
 const HIDDEN_SITE_MAX_AGE_MS = 10 * 60 * 1000;
