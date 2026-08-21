@@ -8,9 +8,9 @@ const puppeteer   = require('puppeteer');
 //  CONFIG
 // ============================================================
 // WARNING: These credentials were shared in chat and should be rotated after deployment.
-const BOT_TOKEN    = "8801907570:AAGfHiS5fg9joWuxHCPXew-IsfPIJhEtwQE";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8612987433:AAEzFrb5_HplcD1COgVzd9wmxdmfTPi709I";
 const OWNER_ID     = 8869874751;
-const OWNER_PASS   = "2004";
+const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
@@ -169,12 +169,26 @@ async function getHiddenSitePage() {
 function normalizeSitePrediction(value) {
     if (!value || typeof value !== "object") return null;
     const side = String(value.side || "").trim().toUpperCase();
-    const number = Number(value.number);
+    const rawNumber = String(value.number ?? "").trim();
+    const numberMatch = rawNumber.match(/(?:^|\D)([0-9])(?:\D|$)/);
+    const number = numberMatch ? Number(numberMatch[1]) : Number.NaN;
     const issueNumber = String(value.issueNumber || "").replace(/[^0-9]/g, "");
     if (!["BIG", "SMALL"].includes(side)) return null;
     if (!Number.isInteger(number) || number < 0 || number > 9) return null;
     if (!/^\d{8,}$/.test(issueNumber)) return null;
     return { side, number, issueNumber, source: SITE_URL };
+}
+
+function formatPrediction(signal) {
+    if (!signal || signal.skip === true) return "SKIP";
+    if (signal.type === "NUMBER") return String(Number(signal.val));
+    if (signal.type === "SIZE") return String(signal.val || "").toUpperCase();
+    if (signal.type === "COMBINED") {
+        const size = String(signal.val || "").toUpperCase();
+        const number = signal.number ?? signal.bets?.find(b => b.type === "NUMBER")?.val;
+        return number === undefined ? size : `${size} OR ${Number(number)}`;
+    }
+    return "SKIP";
 }
 
 async function readSitePrediction() {
@@ -183,7 +197,7 @@ async function readSitePrediction() {
         let page;
         try {
             page = await getHiddenSitePage();
-            await page.waitForSelector('.current-card', { timeout: 12000 });
+            await page.waitForSelector('.current-card, body', { timeout: 12000 });
             // The site may render a blank current card while /api/history is unavailable.
             // Read the entire card so minor class-name/layout changes do not break parsing.
             const raw = await page.evaluate(() => {
@@ -193,13 +207,15 @@ async function readSitePrediction() {
                 const prediction = predictionNode?.textContent || "";
                 const numberText = card.querySelector('.prediction-number, [data-prediction-number], [data-number]')?.textContent || "";
                 const fullText = card.innerText || card.textContent || "";
-                const issueMatch = (label + " " + fullText).match(/(?:ISSUE|PERIOD)\s*#?\s*(\d{8,})/i);
-                const sideMatch = (prediction + " " + fullText).match(/\b(BIG|SMALL)\b/i);
+                const allText = [label, prediction, numberText, fullText].join(" ");
+                const issueMatch = allText.match(/(?:ISSUE|PERIOD|ROUND|NEXT)\s*#?\s*(\d{8,})/i);
+                const sideMatch = allText.match(/\b(BIG|SMALL)\b/i);
                 const explicitNumber = numberText.match(/(?:NUMBER|NO\.?|DIGIT)?\s*[:#-]?\s*([0-9])\b/i);
                 const numberInPrediction = prediction.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i)
                     || prediction.match(/\b([0-9])\b\s*(?:[·|:/-])?\s*(?:BIG|SMALL)\b/i)
                     || prediction.match(/\b(?:BIG|SMALL)\b\s*(?:[·|:/-])?\s*([0-9])\b/i);
-                const numberInFull = fullText.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i);
+                const numberInFull = allText.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i)
+                    || allText.match(/\b(?:BIG|SMALL)\b\s*(?:[·|:/-])?\s*([0-9])\b/i);
                 return {
                     issueNumber: issueMatch?.[1] || "",
                     side: sideMatch?.[1] || "",
@@ -847,9 +863,10 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
 }
 
 // Site-only prediction adapter. No history/formula/pattern prediction is used.
-async function decidePrediction(_list, _currentLevel, userId) {
-    const site = userStates[userId]?.lastSitePrediction?.issueNumber === undefined ? await readSitePrediction() : userStates[userId].lastSitePrediction;
-    if (!site) return null;
+async function decidePrediction(_list, _currentLevel, userId, siteOverride = null) {
+    // Use the current cycle's link result; otherwise read the linked page freshly.
+    const site = siteOverride || await readSitePrediction();
+    if (!site) return { skip: true, reason: "LINK_PREDICTION_UNAVAILABLE" };
     initState(userId);
     userStates[userId].lastSitePrediction = site;
     const mode = autobetCfg[userId]?.mode || "SIZE";
@@ -1006,7 +1023,8 @@ async function runPredict(userId, chatId) {
 
     const sitePrediction = await readSitePrediction();
     if (!sitePrediction) {
-        scheduleRun(userId, chatId, 10000);
+        await send(chatId, "SKIP");
+        scheduleRun(userId, chatId, 15000);
         runInFlight.delete(runKey);
         return;
     }
@@ -1020,10 +1038,10 @@ async function runPredict(userId, chatId) {
 
     initState(userId);
     userStates[userId].lastSitePrediction = sitePrediction;
-    const signal = await decidePrediction(list, st.level, userId);
+    const signal = await decidePrediction(list, st.level, userId, sitePrediction);
     if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip) {
-        await send(chatId, "⏭ SKIP: 3-result alternating pattern detected\nNo bet for period " + next.slice(-6));
+        await send(chatId, "SKIP");
         scheduleRun(userId, chatId, 15000);
         runInFlight.delete(runKey);
         return;
@@ -1053,7 +1071,7 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Mode    : "+modeLabel(cfg.mode)+"\n"+
-"║ Signal  : "+(signal.type==="NUMBER"?"🔢 NUMBER "+signal.val:(signal.type==="COMBINED"?"🔀 "+signal.val:""+(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL")))+"\n"+
+"║ Result  : "+formatPrediction(signal)+"\n"+
     (cfg.mode==="COMBINED" ? "║ Number  : "+signal.bets.find(b=>b.type==="NUMBER")?.val+" (from Synax site)\n" : "")+
 "║ Source  : Synax site\n"+
 "╠══════════════════════════╣\n"+
