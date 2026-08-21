@@ -110,7 +110,12 @@ function scheduleRun(userId, chatId, delayMs) {
 const MAX_LEVEL_HISTORY = 10;
 const HIDDEN_SITE_MAX_AGE_MS = 10 * 60 * 1000;
 const FETCH_COOLDOWN_MS = 2500;
+const SITE_RESULT_WAIT_MS = 4000;
 let lastHiddenPredictionAt = 0;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function closeHiddenSite() {
     if (hiddenSiteCloseTimer) {
@@ -197,6 +202,15 @@ async function readSitePrediction() {
         let page;
         try {
             page = await getHiddenSitePage();
+
+            // Refresh the website for every result request, then wait exactly
+            // four seconds so the client-side prediction card can render.
+            await page.reload({
+                waitUntil: "domcontentloaded",
+                timeout: 30000
+            });
+            await sleep(SITE_RESULT_WAIT_MS);
+
             await page.waitForSelector('.current-card, body', { timeout: 12000 });
             // The site may render a blank current card while /api/history is unavailable.
             // Read the entire card so minor class-name/layout changes do not break parsing.
