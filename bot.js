@@ -20,7 +20,7 @@ const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
 const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
-const SITE_URL    = "https://synax-three.vercel.app/";
+const SITE_URL    = "https://luciferai1570-virid.vercel.app/";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
