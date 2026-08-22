@@ -840,7 +840,9 @@ async function readSitePrediction(targetPeriod) {
                 .map(el => Number.parseInt(el.textContent.trim(), 10))
                 .filter(Number.isInteger) : [];
             const validSide = side === 'BIG' || side === 'SMALL';
-            const validNumber = nums.find(n => n >= 0 && n <= 9);
+            const validNumber = validSide
+                ? nums.find(n => side === 'BIG' ? (n >= 0 && n <= 4) : (n >= 5 && n <= 9))
+                : null;
             if (!validSide || !Number.isInteger(validNumber)) return null;
             return { side, number: validNumber, confidence: null, pattern: 'SITE-ULTIMATE-PRO', signature: `${side}:${validNumber}:${podium.innerText}` };
         });
@@ -863,10 +865,16 @@ async function decidePrediction(_list, currentPeriod, userId) {
     userStates[userId].lastPrediction = result.side;
     userStates[userId].lastNumber = result.number;
     userStates[userId].lastReason = result.pattern;
-    const mode = autobetCfg[userId]?.mode || 'SIZE';
-    if (mode === 'SIZE') return { type: 'SIZE', val: result.side, number: result.number, pat: result.pattern, bets: [{ type: 'SIZE', val: result.side, kind: 'size' }] };
-    if (mode === 'NUMBER') return { type: 'NUMBER', val: result.number, size: result.side, pat: result.pattern, bets: [{ type: 'NUMBER', val: result.number, kind: 'number' }] };
-    return { type: 'COMBINED', val: result.side, number: result.number, pat: result.pattern, bets: [{ type: 'SIZE', val: result.side, kind: 'size' }, { type: 'NUMBER', val: result.number, kind: 'number' }] };
+    // Betting is always combined: one predicted size plus one exact number.
+    // BIG permits only 0-4; SMALL permits only 5-9.
+    const inRange = result.side === 'BIG'
+        ? result.number >= 0 && result.number <= 4
+        : result.number >= 5 && result.number <= 9;
+    if (!inRange) throw new Error(`Site number ${result.number} is outside ${result.side} range`);
+    return { type: 'COMBINED', val: result.side, number: result.number, pat: result.pattern, bets: [
+        { type: 'SIZE', val: result.side, kind: 'size' },
+        { type: 'NUMBER', val: result.number, kind: 'number' }
+    ] };
 }
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initUser(userId);
@@ -1062,7 +1070,7 @@ async function runPredict(userId, chatId) {
 "║    👑 EARN WITH ME AI    ║\n"+
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
-"║ Mode    : "+modeLabel(cfg.mode)+"\n"+
+"║ Mode    : BIG/SMALL + NUMBER\n"+
 "║ Size    : "+signal.val+"\n"+
 "║ Number  : "+(signal.number ?? signal.bets?.find(b=>b.type==="NUMBER")?.val ?? signal.bets?.find(b=>b.type==="SIZE")?.number ?? "-")+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
@@ -1077,17 +1085,12 @@ waitLine+"\n"+
     let placedBets = [];
     if (canBet) {
         const rawSpecs = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
-        const specs = cfg.mode === "SIZE"
-            ? rawSpecs.filter(spec => spec.type === "SIZE")
-            : cfg.mode === "NUMBER"
-                ? rawSpecs.filter(spec => spec.type === "NUMBER")
-                : rawSpecs.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
-        const combinedAmounts = cfg.mode === "COMBINED" ? getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel) : null;
+        // Always place exactly two bets: predicted size + exact in-range number.
+        const specs = rawSpecs.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
+        const combinedAmounts = getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel);
         for (const spec of specs) {
-            const amount = cfg.mode === "COMBINED"
-                ? (spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size)
-                : getSequenceAmount(userId, st.level, spec.kind);
-            const levelForBet = cfg.mode === "COMBINED" ? (spec.kind === "number" ? st.numberLevel : st.sizeLevel) : st.level;
+            const amount = spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size;
+            const levelForBet = spec.kind === "number" ? st.numberLevel : st.sizeLevel;
             const result = await placeBet(userId, chatId, next, spec.val, spec.type, levelForBet, amount);
             if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
             else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
@@ -1099,11 +1102,7 @@ waitLine+"\n"+
 
     // Pass the signal bets separately so WATCH mode can evaluate predictions even when AutoBet is OFF.
     const rawPredictedBets = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
-    const predictedBets = cfg.mode === "SIZE"
-        ? rawPredictedBets.filter(spec => spec.type === "SIZE")
-        : cfg.mode === "NUMBER"
-            ? rawPredictedBets.filter(spec => spec.type === "NUMBER")
-            : rawPredictedBets.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
+    const predictedBets = rawPredictedBets.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
     checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
     runInFlight.delete(runKey);
 }
