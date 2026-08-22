@@ -20,7 +20,7 @@ const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
 const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
-const SITE_URL    = "https://luciferai1570-virid.vercel.app/";
+const SITE_URL    = "cosmic-biscotti-2eafd6.netlify.app";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
@@ -341,7 +341,7 @@ async function getLiveBalance(userId, chatId = null) {
     const url = "https://api.bdg88zf.com/api/webapi/GetBalance";
     const headers = {
         "Authorization": "Bearer " + token,
-        "Ar-Origin": "https://bdgwin901.com",
+        "Ar-Origin": "https://13lwin19.com",
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
     };
 
