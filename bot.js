@@ -7,7 +7,6 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
-// WARNING: These credentials were shared in chat and should be rotated after deployment.
 const BOT_TOKEN    = process.env.BOT_TOKEN || "8612987433:AAEzFrb5_HplcD1COgVzd9wmxdmfTPi709I";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
@@ -19,7 +18,7 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
 const SITE_URL    = "https://jade-macaron-2490ac.netlify.app/";
 
 // Martingale multipliers — user can customize base bet
@@ -212,7 +211,11 @@ function normalizeSitePrediction(value) {
     const issueNumber = String(value.issueNumber || "").replace(/[^0-9]/g, "");
     if (!["BIG", "SMALL"].includes(side)) return null;
     if (!Number.isInteger(number) || number < 0 || number > 9) return null;
-    if (!/^\d{8,}$/.test(issueNumber)) return null;
+    // Requested mapping: BIG only accepts 0..4; SMALL only accepts 5..9.
+    if (side === "BIG" && number > 4) return null;
+    if (side === "SMALL" && number < 5) return null;
+    // The live site displays only the trailing sequence, for example #10641.
+    if (!/^\d{5,}$/.test(issueNumber)) return null;
     return { side, number, issueNumber, source: SITE_URL };
 }
 
@@ -235,38 +238,33 @@ async function readSitePrediction() {
         try {
             page = await getHiddenSitePage();
 
-            // Refresh the website for every result request, then wait exactly
-            // four seconds so the client-side prediction card can render.
-            await page.reload({
-                waitUntil: "domcontentloaded",
-                timeout: 30000
-            });
-            await sleep(SITE_RESULT_WAIT_MS);
-
-            await page.waitForSelector('.current-card, body', { timeout: 12000 });
-            // The site may render a blank current card while /api/history is unavailable.
-            // Read the entire card so minor class-name/layout changes do not break parsing.
+            // The SPA is loaded once in getHiddenSitePage(). Never reload it here:
+            // its own React timers/network polling update the DOM continuously.
+            await page.waitForFunction(() => {
+                const text = document.body?.innerText || "";
+                return /#\d{5,}/.test(text) && /\b(BIG|SMALL)\b/.test(text);
+            }, { timeout: 20000 });
+            await sleep(500);
             const raw = await page.evaluate(() => {
-                const card = document.querySelector('.current-card') || document;
-                const label = card.querySelector('.label')?.textContent || "";
-                const predictionNode = card.querySelector('.prediction');
-                const prediction = predictionNode?.textContent || "";
-                const numberText = card.querySelector('.prediction-number, [data-prediction-number], [data-number]')?.textContent || "";
-                const fullText = card.innerText || card.textContent || "";
-                const allText = [label, prediction, numberText, fullText].join(" ");
-                const issueMatch = allText.match(/(?:ISSUE|PERIOD|ROUND|NEXT)\s*#?\s*(\d{8,})/i);
-                const sideMatch = allText.match(/\b(BIG|SMALL)\b/i);
-                const explicitNumber = numberText.match(/(?:NUMBER|NO\.?|DIGIT)?\s*[:#-]?\s*([0-9])\b/i);
-                const numberInPrediction = prediction.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i)
-                    || prediction.match(/\b([0-9])\b\s*(?:[·|:/-])?\s*(?:BIG|SMALL)\b/i)
-                    || prediction.match(/\b(?:BIG|SMALL)\b\s*(?:[·|:/-])?\s*([0-9])\b/i);
-                const numberInFull = allText.match(/(?:NUMBER|NO\.?|DIGIT)\s*[:#-]?\s*([0-9])\b/i)
-                    || allText.match(/\b(?:BIG|SMALL)\b\s*(?:[·|:/-])?\s*([0-9])\b/i);
+                const textOf = node => (node?.innerText || node?.textContent || "").trim();
+                const podium = document.querySelector('.ios-liquid-podium');
+                const issueNode = [...document.querySelectorAll('div,span')]
+                    .find(node => /^#\d{5,}$/.test(textOf(node)));
+                const podiumText = textOf(podium);
+                const sideMatch = podiumText.match(/\b(BIG|SMALL)\b/i);
+                const side = sideMatch?.[1]?.toUpperCase() || "";
+                const numbers = podium
+                    ? [...podium.querySelectorAll('div')].map(textOf)
+                        .filter(v => /^\d$/.test(v)).map(Number)
+                    : [];
+                // Preserve the site's size, then choose only a number valid for it.
+                const allowed = side === "BIG" ? numbers.filter(n => n >= 0 && n <= 4)
+                    : side === "SMALL" ? numbers.filter(n => n >= 5 && n <= 9) : [];
                 return {
-                    issueNumber: issueMatch?.[1] || "",
-                    side: sideMatch?.[1] || "",
-                    number: (explicitNumber || numberInPrediction || numberInFull)?.[1] ?? "",
-                    rawText: fullText.slice(0, 500)
+                    issueNumber: textOf(issueNode).replace(/^#/, ""),
+                    side,
+                    number: allowed[0] ?? "",
+                    rawText: podiumText || textOf(document.body).slice(0, 500)
                 };
             });
             const parsed = normalizeSitePrediction(raw);
@@ -281,11 +279,12 @@ async function readSitePrediction() {
             console.warn("[SITE PREDICTION] Read failed; skipping:", error.message);
             return null;
         } finally {
-            // Chromium pages can retain SPA resources between refreshes. Close the
-            // page and browser after each read so Render memory stays bounded.
-            await closeHiddenSite().catch(closeError => {
-                console.warn("[SITE CLEANUP]", closeError?.message || closeError);
-            });
+            // Re-arm the inactivity cleanup without closing the active SPA after
+            // each read. This keeps one bounded browser/page pair, not one per poll.
+            if (hiddenPage && !hiddenPage.isClosed()) {
+                hiddenSiteLastUsed = Date.now();
+                armHiddenSiteCleanup();
+            }
             sitePredictionInFlight = null;
         }
     })();
@@ -845,6 +844,22 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 // ============================================================
 let userStates = {};
 
+function resolveTargetIssue(siteIssueNumber, list) {
+    if (!Array.isArray(list) || !list.length) return null;
+    const apiIssues = list.map(item => String(item?.issueNumber || ""))
+        .filter(v => /^\d{8,}$/.test(v));
+    if (!apiIssues.length) return null;
+    const suffix = String(siteIssueNumber || "").replace(/\D/g, "");
+    const matching = apiIssues.find(issue => issue.endsWith(suffix));
+    const base = matching || apiIssues[0];
+    try {
+        const candidate = (BigInt(base) + 1n).toString();
+        return candidate.length === base.length ? candidate : null;
+    } catch {
+        return null;
+    }
+}
+
 function buildBSFromList(list, count = 15) {
     if (!Array.isArray(list)) return [];
     return list.slice(0, count).reverse().map(item => {
@@ -1078,8 +1093,14 @@ async function runPredict(userId, chatId) {
         runInFlight.delete(runKey);
         return;
     }
-    const next = sitePrediction.issueNumber;
-    if (!/^\d{8,}$/.test(String(next))) { scheduleRun(userId, chatId, 10000); runInFlight.delete(runKey); return; }
+    const next = resolveTargetIssue(sitePrediction.issueNumber, list);
+    if (!next) {
+        console.warn("[PREDICTION] Could not map site period to draw API issue", sitePrediction.issueNumber);
+        await send(chatId, "SKIP");
+        scheduleRun(userId, chatId, 10000);
+        runInFlight.delete(runKey);
+        return;
+    }
     if (sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 3000); runInFlight.delete(runKey); return; }
     sentPeriods[userId].add(next);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
