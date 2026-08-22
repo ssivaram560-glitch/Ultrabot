@@ -89,6 +89,38 @@ function clearUserTimers(userId) {
     runInFlight.delete(key);
 }
 
+function cleanupUserResources(userId, removeAccess = false) {
+    const key = String(userId);
+    clearUserTimers(key);
+    delete resultCheckInFlight[key];
+    delete runInFlight[key];
+    delete adminState[key];
+    delete userAction[key];
+    delete userCreds[key];
+    delete userTokens[key];
+    delete stats[key];
+    delete userStates[key];
+    delete autobetCfg[key];
+    delete autobetState[key];
+    delete profitTrack[key];
+    delete sentPeriods[key];
+    delete running[key];
+    if (removeAccess) delete usersAccess[key];
+}
+
+function pruneExpiredUsers() {
+    const now = Date.now();
+    for (const key of Object.keys(usersAccess)) {
+        if (!running[key] && Number(usersAccess[key]) <= now) {
+            cleanupUserResources(key, true);
+        }
+    }
+}
+
+// Prevent abandoned user objects and expired access records from accumulating.
+const userPruneTimer = setInterval(pruneExpiredUsers, 10 * 60 * 1000);
+userPruneTimer.unref?.();
+
 function scheduleRun(userId, chatId, delayMs) {
     const key = String(userId);
     if (!running[userId]) return;
@@ -110,7 +142,7 @@ function scheduleRun(userId, chatId, delayMs) {
 const MAX_LEVEL_HISTORY = 10;
 const HIDDEN_SITE_MAX_AGE_MS = 10 * 60 * 1000;
 const FETCH_COOLDOWN_MS = 2500;
-const SITE_RESULT_WAIT_MS = 4000;
+const SITE_RESULT_WAIT_MS = 6000;
 let lastHiddenPredictionAt = 0;
 
 function sleep(ms) {
@@ -249,6 +281,11 @@ async function readSitePrediction() {
             console.warn("[SITE PREDICTION] Read failed; skipping:", error.message);
             return null;
         } finally {
+            // Chromium pages can retain SPA resources between refreshes. Close the
+            // page and browser after each read so Render memory stays bounded.
+            await closeHiddenSite().catch(closeError => {
+                console.warn("[SITE CLEANUP]", closeError?.message || closeError);
+            });
             sitePredictionInFlight = null;
         }
     })();
@@ -385,7 +422,6 @@ function daysLeft(id) {
 }
 function isAdmin(id)    { return adminPasswords[id] !== undefined; }
 function isAdminIn(id)  { return adminLoggedIn[id] === true; }
-function sleep(ms)      { return new Promise(r => setTimeout(r, ms)); }
 function getToken(id)   { return userTokens[id] || GLOBAL_TOKEN || ""; }
 
 function generateKey(days, by) {
@@ -1527,7 +1563,7 @@ function addHandlers(){
             else if(s.action==="removeadmin"){const t=parseInt(text);if(isNaN(t))return;delete adminPasswords[t];delete adminLoggedIn[t];ownerState=null;send(OWNER_ID,"🚫 Removed",{reply_markup:ownerMenu});return;}
             else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌ Days?");const k=generateKey(d,OWNER_ID);ownerState=null;return send(OWNER_ID,"🔑 Key:\n\n"+k+"\n\n"+d+"d\n/key "+k,{reply_markup:ownerMenu});}
             else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"adduser",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌");usersAccess[s.tid]=Date.now()+d*86400000;ownerState=null;send(OWNER_ID,"✅ "+s.tid+" "+d+"d",{reply_markup:ownerMenu});send(s.tid,"🎊 VIP! "+d+" days\n▶️ Start Prediction!");return;}}
-            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;if(Number(t)===Number(OWNER_ID))return send(OWNER_ID,"❌ Owner access cannot be removed.",{reply_markup:ownerMenu});const was=hasAccess(t);delete usersAccess[t];clearUserTimers(t); running[t]=false;ownerState=null;send(OWNER_ID,was?"🚫 Removed":"⚠️ Not active",{reply_markup:ownerMenu});if(was)send(t,"🔴 Access removed.");return;}
+            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;if(Number(t)===Number(OWNER_ID))return send(OWNER_ID,"❌ Owner access cannot be removed.",{reply_markup:ownerMenu});const was=hasAccess(t);cleanupUserResources(t, true);ownerState=null;send(OWNER_ID,was?"🚫 Removed":"⚠️ Not active",{reply_markup:ownerMenu});if(was)send(t,"🔴 Access removed.");return;}
             else if(s.action==="settoken"){GLOBAL_TOKEN=text.trim().replace(/^Bearer\s+/i,"");ownerState=null;return send(OWNER_ID,"✅ Global Token set!",{reply_markup:ownerMenu});}
         }
 
@@ -1569,7 +1605,7 @@ function addHandlers(){
             if(AB.includes(text)){ delete adminState[id]; }
             else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(id,"❌ Days?");const k=generateKey(d,id);delete adminState[id];return send(id,"🔑 Key:\n\n"+k+"\n\n"+d+"d",{reply_markup:adminMenu});}
             else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(id,"❌");adminState[id]={action:"adduser",step2:true,tid:t};return send(id,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(id,"❌");usersAccess[s.tid]=Date.now()+d*86400000;delete adminState[id];send(id,"✅ "+s.tid+" "+d+"d",{reply_markup:adminMenu});send(s.tid,"🎊 ACCESS! "+d+"d");return;}}
-            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;if(Number(t)===Number(OWNER_ID))return send(id,"❌ Owner access cannot be removed.",{reply_markup:adminMenu});const was=hasAccess(t);delete usersAccess[t];clearUserTimers(t); running[t]=false;delete adminState[id];send(id,was?"🚫 Removed":"⚠️ Not active",{reply_markup:adminMenu});if(was)send(t,"🔴 Removed.");return;}
+            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;if(Number(t)===Number(OWNER_ID))return send(id,"❌ Owner access cannot be removed.",{reply_markup:adminMenu});const was=hasAccess(t);cleanupUserResources(t, true);delete adminState[id];send(id,was?"🚫 Removed":"⚠️ Not active",{reply_markup:adminMenu});if(was)send(t,"🔴 Removed.");return;}
         }
 
         if(hasAccess(id) && userAction[id]){
