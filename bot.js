@@ -63,12 +63,15 @@ let autobetState   = {};
 let profitTrack    = {};
 let GLOBAL_TOKEN   = "";
 let userTokens = {};
+let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
 const resultCheckInFlight = new Set();
 const runInFlight = new Set();
 const loginInFlight = new Map();
 const MAX_SENT_PERIODS = 6;
+const MAX_KEYS = 5000;
+const USER_IDLE_TTL_MS = 60 * 60 * 1000;
 
 function clearUserTimers(userId) {
     const key = String(userId);
@@ -92,6 +95,7 @@ function cleanupUserResources(userId, removeAccess = false) {
     delete userAction[key];
     delete userCreds[key];
     delete userTokens[key];
+    delete userLastSeen[key];
     delete stats[key];
     delete userStates[key];
     delete autobetCfg[key];
@@ -104,10 +108,20 @@ function cleanupUserResources(userId, removeAccess = false) {
 
 function pruneExpiredUsers() {
     const now = Date.now();
-    for (const key of Object.keys(usersAccess)) {
-        if (!running[key] && Number(usersAccess[key]) <= now) {
-            cleanupUserResources(key, true);
-        }
+    const tracked = new Set([
+        ...Object.keys(usersAccess),
+        ...Object.keys(userLastSeen),
+        ...Object.keys(stats),
+        ...Object.keys(userStates),
+        ...Object.keys(autobetCfg),
+        ...Object.keys(autobetState),
+        ...Object.keys(profitTrack)
+    ]);
+    for (const key of tracked) {
+        const expired = usersAccess[key] && Number(usersAccess[key]) <= now;
+        const idle = !running[key] && !hasAccess(key) &&
+            now - Number(userLastSeen[key] || 0) > USER_IDLE_TTL_MS;
+        if (!running[key] && (expired || idle)) cleanupUserResources(key, true);
     }
 }
 
@@ -210,6 +224,7 @@ async function getLiveBalance(userId, chatId = null) {
 }
 
 function initUser(id) {
+    userLastSeen[id] = Date.now();
     if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0,levelWins:{},sizeLevelWins:{},numberLevelWins:{} };
    if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
@@ -272,7 +287,14 @@ function getToken(id)   { return userTokens[id] || GLOBAL_TOKEN || ""; }
 
 function generateKey(days, by) {
     const k = "EARN WITH ME-"+crypto.randomBytes(3).toString('hex').toUpperCase()+"-"+crypto.randomBytes(2).toString('hex').toUpperCase();
-    keyStore[k] = { days, used:false, usedBy:null, by:by||OWNER_ID };
+    keyStore[k] = { days, used:false, usedBy:null, by:by||OWNER_ID, createdAt: Date.now() };
+    const keys = Object.keys(keyStore);
+    if (keys.length > MAX_KEYS) {
+        for (const key of keys) {
+            if (keyStore[key]?.used) delete keyStore[key];
+            if (Object.keys(keyStore).length <= MAX_KEYS) break;
+        }
+    }
     return k;
 }
 function activateKey(userId, code) {
@@ -1374,6 +1396,7 @@ const autobetMenu={keyboard:[
 //  BOT INIT
 // ============================================================
 let bot;
+let handlersAttachedTo = null;
 let pollingRecovery = false;
 function recoverPolling(err) {
     if (pollingRecovery || !bot) return;
@@ -1442,6 +1465,8 @@ async function sendSticker(chatId,sid){try{await bot.sendSticker(chatId,sid);}ca
 //  HANDLERS
 // ============================================================
 function addHandlers(){
+    if (handlersAttachedTo === bot) return;
+    handlersAttachedTo = bot;
     bot.onText(/\/start/,(msg)=>{
         const id=msg.from.id;initUser(id);
         const status=hasAccess(id)?"✅ ACTIVE — "+daysLeft(id)+"d left":"❌ NO ACCESS";
