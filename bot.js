@@ -140,8 +140,7 @@ function sleep(ms) {
 
 async function fetchList() {
     try {
-        // The prediction page is read separately; this endpoint is used only to settle completed bets.
-        // Prediction values are never derived from this history list.
+        // Draw history is the input for the local HTML-equivalent prediction engine and result settlement.
         const response = await axios.get(DRAW_URL, {
             headers: {
                 "Accept": "application/json, text/plain, */*",
@@ -692,8 +691,10 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 let userStates = {};
 
 function getNextIssue(list) {
-    const latest = String(list?.[0]?.issueNumber || "");
-    if (!/^\d{8,}$/.test(latest)) return null;
+    const latest = (Array.isArray(list) ? list : [])
+        .map(item => String(item?.issueNumber || ""))
+        .find(issue => /^\d{8,}$/.test(issue));
+    if (!latest) return null;
     try {
         const next = (BigInt(latest) + 1n).toString();
         return next.length === latest.length ? next : null;
@@ -769,8 +770,8 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
     }
 }
 
-// Site-only prediction adapter. No history/formula/pattern prediction is used.
-async function normalizeDrawHistory(list) {
+// Local prediction adapter translated from the supplied HTML engine.
+function normalizeDrawHistory(list) {
     if (!Array.isArray(list)) return [];
     return list.map(item => {
         const number = Number.parseInt(item?.number ?? item?.winNumber, 10);
@@ -973,7 +974,12 @@ async function runPredict(userId, chatId) {
     }
 
     const list = await fetchList();
-    if(!list) { scheduleRun(userId, chatId, 15000); runInFlight.delete(runKey); return; }
+    if (!Array.isArray(list) || list.length === 0) {
+        console.warn("[PREDICTION] Draw history unavailable; retrying without emitting a false prediction");
+        scheduleRun(userId, chatId, 15000);
+        runInFlight.delete(runKey);
+        return;
+    }
 
     // The draw API is the only external data input. Prediction is computed locally
     // from the supplied HTML algorithm; no website/browser navigation is used.
@@ -994,7 +1000,9 @@ async function runPredict(userId, chatId) {
     const signal = await decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip) {
-        await send(chatId, "SKIP");
+        // This should only happen when the API returned no usable numbers.
+        console.warn("[PREDICTION] Local engine skipped:", signal.reason);
+        await send(chatId, "SKIP — history unavailable");
         scheduleRun(userId, chatId, 15000);
         runInFlight.delete(runKey);
         return;
