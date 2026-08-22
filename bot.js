@@ -2,11 +2,11 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
 const zlib        = require('zlib');
-const puppeteer   = require('puppeteer');
 
 // ============================================================
 //  CONFIG
 // ============================================================
+// WARNING: These credentials were shared in chat and should be rotated after deployment.
 const BOT_TOKEN    = process.env.BOT_TOKEN || "8612987433:AAEzFrb5_HplcD1COgVzd9wmxdmfTPi709I";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
@@ -67,12 +67,6 @@ const resultCheckTimers = new Map();
 const resultCheckInFlight = new Set();
 const runInFlight = new Set();
 const loginInFlight = new Map();
-let hiddenBrowser = null;
-let hiddenPage = null;
-let hiddenPagePromise = null;
-let hiddenSiteLastUsed = 0;
-let hiddenSiteCloseTimer = null;
-let sitePredictionInFlight = null;
 const MAX_SENT_PERIODS = 6;
 
 function clearUserTimers(userId) {
@@ -139,156 +133,9 @@ function scheduleRun(userId, chatId, delayMs) {
     nextRunTimers.set(key, timer);
 }
 const MAX_LEVEL_HISTORY = 10;
-const HIDDEN_SITE_MAX_AGE_MS = 10 * 60 * 1000;
-const FETCH_COOLDOWN_MS = 2500;
-const SITE_RESULT_WAIT_MS = 6000;
-let lastHiddenPredictionAt = 0;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function closeHiddenSite() {
-    if (hiddenSiteCloseTimer) {
-        clearTimeout(hiddenSiteCloseTimer);
-        hiddenSiteCloseTimer = null;
-    }
-    const page = hiddenPage;
-    const browser = hiddenBrowser;
-    hiddenPage = null;
-    hiddenBrowser = null;
-    hiddenPagePromise = null;
-    hiddenSiteLastUsed = 0;
-    try { if (page && !page.isClosed()) await page.close(); } catch (e) { console.warn("[SITE PAGE CLOSE]", e.message); }
-    try { if (browser) await browser.close(); } catch (e) { console.warn("[SITE BROWSER CLOSE]", e.message); }
-}
-
-function armHiddenSiteCleanup() {
-    if (hiddenSiteCloseTimer) clearTimeout(hiddenSiteCloseTimer);
-    hiddenSiteCloseTimer = setTimeout(() => {
-        closeHiddenSite().catch(() => {});
-    }, 2 * 60 * 1000);
-    if (typeof hiddenSiteCloseTimer.unref === "function") hiddenSiteCloseTimer.unref();
-}
-
-process.once("SIGINT", () => closeHiddenSite().finally(() => process.exit(0)));
-process.once("SIGTERM", () => closeHiddenSite().finally(() => process.exit(0)));
-
-async function getHiddenSitePage() {
-    if (hiddenPage && !hiddenPage.isClosed()) {
-        hiddenSiteLastUsed = Date.now();
-        armHiddenSiteCleanup();
-        return hiddenPage;
-    }
-    if (!hiddenPagePromise) {
-        hiddenPagePromise = (async () => {
-            hiddenBrowser = await puppeteer.launch({
-                headless: true,
-                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            });
-            hiddenPage = await hiddenBrowser.newPage();
-            await hiddenPage.setCacheEnabled(false);
-            await hiddenPage.setRequestInterception(false);
-            await hiddenPage.setViewport({ width: 420, height: 900 });
-            await hiddenPage.goto(SITE_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-            hiddenSiteLastUsed = Date.now();
-            armHiddenSiteCleanup();
-            return hiddenPage;
-        })().catch(async error => {
-            await closeHiddenSite();
-            throw error;
-        });
-    }
-    return hiddenPagePromise;
-}
-
-function normalizeSitePrediction(value) {
-    if (!value || typeof value !== "object") return null;
-    const side = String(value.side || "").trim().toUpperCase();
-    const rawNumber = String(value.number ?? "").trim();
-    const numberMatch = rawNumber.match(/(?:^|\D)([0-9])(?:\D|$)/);
-    const number = numberMatch ? Number(numberMatch[1]) : Number.NaN;
-    const issueNumber = String(value.issueNumber || "").replace(/[^0-9]/g, "");
-    if (!["BIG", "SMALL"].includes(side)) return null;
-    if (!Number.isInteger(number) || number < 0 || number > 9) return null;
-    // Requested mapping: BIG only accepts 0..4; SMALL only accepts 5..9.
-    if (side === "BIG" && number > 4) return null;
-    if (side === "SMALL" && number < 5) return null;
-    // The live site displays only the trailing sequence, for example #10641.
-    if (!/^\d{5,}$/.test(issueNumber)) return null;
-    return { side, number, issueNumber, source: SITE_URL };
-}
-
-function formatPrediction(signal) {
-    if (!signal || signal.skip === true) return "SKIP";
-    if (signal.type === "NUMBER") return String(Number(signal.val));
-    if (signal.type === "SIZE") return String(signal.val || "").toUpperCase();
-    if (signal.type === "COMBINED") {
-        const size = String(signal.val || "").toUpperCase();
-        const number = signal.number ?? signal.bets?.find(b => b.type === "NUMBER")?.val;
-        return number === undefined ? size : `${size} OR ${Number(number)}`;
-    }
-    return "SKIP";
-}
-
-async function readSitePrediction() {
-    if (sitePredictionInFlight) return sitePredictionInFlight;
-    sitePredictionInFlight = (async () => {
-        let page;
-        try {
-            page = await getHiddenSitePage();
-
-            // The SPA is loaded once in getHiddenSitePage(). Never reload it here:
-            // its own React timers/network polling update the DOM continuously.
-            await page.waitForFunction(() => {
-                const text = document.body?.innerText || "";
-                return /#\d{5,}/.test(text) && /\b(BIG|SMALL)\b/.test(text);
-            }, { timeout: 20000 });
-            await sleep(500);
-            const raw = await page.evaluate(() => {
-                const textOf = node => (node?.innerText || node?.textContent || "").trim();
-                const podium = document.querySelector('.ios-liquid-podium');
-                const issueNode = [...document.querySelectorAll('div,span')]
-                    .find(node => /^#\d{5,}$/.test(textOf(node)));
-                const podiumText = textOf(podium);
-                const sideMatch = podiumText.match(/\b(BIG|SMALL)\b/i);
-                const side = sideMatch?.[1]?.toUpperCase() || "";
-                const numbers = podium
-                    ? [...podium.querySelectorAll('div')].map(textOf)
-                        .filter(v => /^\d$/.test(v)).map(Number)
-                    : [];
-                // Preserve the site's size, then choose only a number valid for it.
-                const allowed = side === "BIG" ? numbers.filter(n => n >= 0 && n <= 4)
-                    : side === "SMALL" ? numbers.filter(n => n >= 5 && n <= 9) : [];
-                return {
-                    issueNumber: textOf(issueNode).replace(/^#/, ""),
-                    side,
-                    number: allowed[0] ?? "",
-                    rawText: podiumText || textOf(document.body).slice(0, 500)
-                };
-            });
-            const parsed = normalizeSitePrediction(raw);
-            if (!parsed) {
-                console.warn("[SITE PREDICTION] Output unavailable or incomplete; skipping. Site card:", raw.rawText || "(blank)");
-                return null;
-            }
-            hiddenSiteLastUsed = Date.now();
-            armHiddenSiteCleanup();
-            return parsed;
-        } catch (error) {
-            console.warn("[SITE PREDICTION] Read failed; skipping:", error.message);
-            return null;
-        } finally {
-            // Re-arm the inactivity cleanup without closing the active SPA after
-            // each read. This keeps one bounded browser/page pair, not one per poll.
-            if (hiddenPage && !hiddenPage.isClosed()) {
-                hiddenSiteLastUsed = Date.now();
-                armHiddenSiteCleanup();
-            }
-            sitePredictionInFlight = null;
-        }
-    })();
-    return sitePredictionInFlight;
 }
 
 async function fetchList() {
@@ -844,17 +691,12 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 // ============================================================
 let userStates = {};
 
-function resolveTargetIssue(siteIssueNumber, list) {
-    if (!Array.isArray(list) || !list.length) return null;
-    const apiIssues = list.map(item => String(item?.issueNumber || ""))
-        .filter(v => /^\d{8,}$/.test(v));
-    if (!apiIssues.length) return null;
-    const suffix = String(siteIssueNumber || "").replace(/\D/g, "");
-    const matching = apiIssues.find(issue => issue.endsWith(suffix));
-    const base = matching || apiIssues[0];
+function getNextIssue(list) {
+    const latest = String(list?.[0]?.issueNumber || "");
+    if (!/^\d{8,}$/.test(latest)) return null;
     try {
-        const candidate = (BigInt(base) + 1n).toString();
-        return candidate.length === base.length ? candidate : null;
+        const next = (BigInt(latest) + 1n).toString();
+        return next.length === latest.length ? next : null;
     } catch {
         return null;
     }
@@ -928,23 +770,70 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
 }
 
 // Site-only prediction adapter. No history/formula/pattern prediction is used.
-async function decidePrediction(_list, _currentLevel, userId, siteOverride = null) {
-    // Use the current cycle's link result; otherwise read the linked page freshly.
-    const site = siteOverride || await readSitePrediction();
-    if (!site) return { skip: true, reason: "LINK_PREDICTION_UNAVAILABLE" };
+async function normalizeDrawHistory(list) {
+    if (!Array.isArray(list)) return [];
+    return list.map(item => {
+        const number = Number.parseInt(item?.number ?? item?.winNumber, 10);
+        return {
+            issueNumber: String(item?.issueNumber || ""),
+            number,
+            side: Number.isInteger(number) ? (number >= 5 ? "BIG" : "SMALL") : ""
+        };
+    }).filter(item => /^\d{8,}$/.test(item.issueNumber) && Number.isInteger(item.number) && item.number >= 0 && item.number <= 9);
+}
+
+function leastFrequentNumber(history, numbers) {
+    const counts = Object.fromEntries(numbers.map(n => [n, 0]));
+    for (const item of history) if (counts[item.number] !== undefined) counts[item.number]++;
+    return numbers.reduce((best, n) => counts[n] < counts[best] ? n : best, numbers[0]);
+}
+
+// Local translation of the HTML engine: mirror/streak/alternation/trend,
+// weighted number analysis, gap recovery, and adaptive memory. No site is read.
+function htmlPrediction(history, userId) {
     initState(userId);
-    userStates[userId].lastSitePrediction = site;
+    const state = userStates[userId];
+    const h = normalizeDrawHistory(history);
+    if (!h.length) return null;
+
+    const sideScore = { BIG: 0, SMALL: 0 };
+    const sides = h.slice(0, 5).map(x => x.side);
+    if (sides.length >= 5 && sides[0] === sides[4] && sides[1] === sides[3]) {
+        sideScore[sides[0] === "BIG" ? "SMALL" : "BIG"] += 3;
+    }
+    let streak = 1;
+    for (let i = 1; i < h.length && h[i].side === h[i - 1].side; i++) streak++;
+    if (streak >= 4) sideScore[streak >= 6 ? (h[0].side === "BIG" ? "SMALL" : "BIG") : h[0].side] += streak >= 6 ? 4 : 2;
+    const lastFive = h.slice(0, 5).map(x => x.side);
+    if (lastFive.length === 5 && lastFive.every((v, i) => i === 0 || v !== lastFive[i - 1])) {
+        sideScore[lastFive[4] === "BIG" ? "SMALL" : "BIG"] += 3;
+    }
+    let weighted = 0;
+    const weights = [8, 5, 3, 2, 1, 1, 1, 1];
+    h.slice(0, 8).forEach((item, i) => { weighted += (item.number >= 5 ? 1 : -1) * weights[i]; });
+    sideScore[weighted > 0 ? "BIG" : "SMALL"] += 2;
+    const missing = [0,1,2,3,4,5,6,7,8,9].filter(n => !h.slice(0, 15).some(x => x.number === n));
+    if (missing.length) sideScore[missing[0] >= 5 ? "BIG" : "SMALL"] += 1.5;
+    if ((stats[userId]?.lossStreak || 0) >= 2) sideScore[h[0].side === "BIG" ? "SMALL" : "BIG"] += 2;
+
+    const side = sideScore.BIG >= sideScore.SMALL ? "BIG" : "SMALL";
+    // Requested bot mapping: BIG -> 0..4 and SMALL -> 5..9.
+    const allowed = side === "BIG" ? [0,1,2,3,4] : [5,6,7,8,9];
+    const number = leastFrequentNumber(h.slice(0, 15), allowed);
+    const confidence = Math.min(95, 65 + Math.round(Math.abs(sideScore.BIG - sideScore.SMALL) * 5));
+    state.lastPrediction = side;
+    state.lastNumber = number;
+    state.lastReason = "ULTIMATE-PRO-ADAPTIVE";
+    return { side, number, conf: confidence, pat: "ULTIMATE-PRO-ADAPTIVE" };
+}
+
+async function decidePrediction(list, _currentLevel, userId) {
+    const result = htmlPrediction(list, userId);
+    if (!result) return { skip: true, reason: "INSUFFICIENT_HISTORY" };
     const mode = autobetCfg[userId]?.mode || "SIZE";
-    if (mode === "SIZE") {
-        return { type: "SIZE", val: site.side, number: site.number, issueNumber: site.issueNumber, conf: 100, pat: "SYNAX_SITE", bets: [{ type: "SIZE", val: site.side, kind: "size" }] };
-    }
-    if (mode === "NUMBER") {
-        return { type: "NUMBER", val: site.number, size: site.side, issueNumber: site.issueNumber, conf: 100, pat: "SYNAX_SITE", bets: [{ type: "NUMBER", val: site.number, kind: "number" }] };
-    }
-    return {
-        type: "COMBINED", val: site.side, number: site.number, issueNumber: site.issueNumber, conf: 100, pat: "SYNAX_SITE",
-        bets: [{ type: "SIZE", val: site.side, kind: "size" }, { type: "NUMBER", val: site.number, kind: "number" }]
-    };
+    if (mode === "SIZE") return { type: "SIZE", val: result.side, number: result.number, conf: result.conf, pat: result.pat, bets: [{ type: "SIZE", val: result.side, kind: "size" }] };
+    if (mode === "NUMBER") return { type: "NUMBER", val: result.number, size: result.side, conf: result.conf, pat: result.pat, bets: [{ type: "NUMBER", val: result.number, kind: "number" }] };
+    return { type: "COMBINED", val: result.side, number: result.number, conf: result.conf, pat: result.pat, bets: [{ type: "SIZE", val: result.side, kind: "size" }, { type: "NUMBER", val: result.number, kind: "number" }] };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
@@ -1086,16 +975,10 @@ async function runPredict(userId, chatId) {
     const list = await fetchList();
     if(!list) { scheduleRun(userId, chatId, 15000); runInFlight.delete(runKey); return; }
 
-    const sitePrediction = await readSitePrediction();
-    if (!sitePrediction) {
-        await send(chatId, "SKIP");
-        scheduleRun(userId, chatId, 15000);
-        runInFlight.delete(runKey);
-        return;
-    }
-    const next = resolveTargetIssue(sitePrediction.issueNumber, list);
+    // The draw API is the only external data input. Prediction is computed locally
+    // from the supplied HTML algorithm; no website/browser navigation is used.
+    const next = getNextIssue(list);
     if (!next) {
-        console.warn("[PREDICTION] Could not map site period to draw API issue", sitePrediction.issueNumber);
         await send(chatId, "SKIP");
         scheduleRun(userId, chatId, 10000);
         runInFlight.delete(runKey);
@@ -1108,8 +991,7 @@ async function runPredict(userId, chatId) {
     }
 
     initState(userId);
-    userStates[userId].lastSitePrediction = sitePrediction;
-    const signal = await decidePrediction(list, st.level, userId, sitePrediction);
+    const signal = await decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip) {
         await send(chatId, "SKIP");
@@ -1142,9 +1024,10 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Mode    : "+modeLabel(cfg.mode)+"\n"+
+"║ Size    : "+signal.val+"\n"+
+"║ Number  : "+(signal.number ?? signal.bets?.find(b=>b.type==="NUMBER")?.val ?? signal.bets?.find(b=>b.type==="SIZE")?.number ?? "-")+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-    (cfg.mode==="COMBINED" ? "║ Number  : "+signal.bets.find(b=>b.type==="NUMBER")?.val+" (from Synax site)\n" : "")+
-"║ Source  : Synax site\n"+
+"║ Source  : Local HTML Engine\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
