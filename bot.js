@@ -24,6 +24,8 @@ const SITE_URL    = "https://jade-macaron-2490ac.netlify.app/";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
+const SIZE_WIN_MULTIPLIER = 1.85;   // Net profit multiplier for BIG/SMALL wins
+const NUMBER_WIN_MULTIPLIER = 8.95; // Net profit multiplier for exact number wins
 
 // ============================================================
 //  RENDER KEEP-ALIVE
@@ -767,10 +769,10 @@ function combinedSettlement(bets, actualSize, actualNumber) {
     const total = sizeAmount + numberAmount;
     const sizeWon = bets.some(b => b.type === "SIZE" && b.val === actualSize);
     const numberWon = numberBets.some(b => Number(b.val) === Number(actualNumber));
-    if (sizeWon) return { won: true, pnl: sizeAmount * 0.98 - numberAmount, reason: "CATEGORY" };
+    if (sizeWon) return { won: true, pnl: sizeAmount * SIZE_WIN_MULTIPLIER - numberAmount, reason: "CATEGORY" };
     if (numberWon) {
         const winning = numberBets.filter(b => Number(b.val) === Number(actualNumber)).reduce((n, b) => n + Number(b.amt || 0), 0);
-        return { won: true, pnl: winning * 8 - (total - winning), reason: "NUMBER" };
+        return { won: true, pnl: winning * NUMBER_WIN_MULTIPLIER - (total - winning), reason: "NUMBER" };
     }
     return { won: false, pnl: -total, reason: "NONE" };
 }
@@ -932,7 +934,16 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
-    const profit = settlement ? settlement.pnl : amt * 0.98;
+    let profit;
+    if (settlement) {
+        profit = settlement.pnl;
+    } else {
+        const numberAmount = bets.filter(b => b.type === "NUMBER").reduce((sum, b) => sum + Number(b.amt || 0), 0);
+        const sizeAmount = bets.filter(b => b.type === "SIZE").reduce((sum, b) => sum + Number(b.amt || 0), 0);
+        profit = numberAmount > 0
+            ? numberAmount * NUMBER_WIN_MULTIPLIER - (amt - numberAmount)
+            : sizeAmount * SIZE_WIN_MULTIPLIER - (amt - sizeAmount);
+    }
     
     pt.totalBets++; pt.wins++; pt.pnl += profit; 
     pt.totalBetAmount = (pt.totalBetAmount || 0) + amt;
@@ -1375,7 +1386,7 @@ waitLine+"\n"+
 //  KEYBOARDS
 // ============================================================
 function userMenu(id){
-    const rows=[["▶️ Start Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
+    const rows=[["▶️ Start Prediction"],["⏹ Stop Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
     if(isAdmin(id))rows.push(["👑 Admin Panel"]);
     return{keyboard:rows,resize_keyboard:true};
 }
@@ -1763,6 +1774,13 @@ if(text==="🔢 Set Watch Losses"){
         if(text==="🔑 My Token"){
             const tok=getToken(id),creds=userCreds[id]||{};
             return send(id,"Token: "+(tok.length>20?"✅ ..."+tok.slice(-12):"❌")+"\nLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n\n/setcreds FULLPHONE PASSWORD\n/setmytoken TOKEN\n/login — Test");
+        }
+
+        if(text==="⏹ Stop Prediction"){
+            if(!running[id]) return send(msg.chat.id,"⚠️ Bot is not running.",{reply_markup:userMenu(id)});
+            running[id]=false;
+            clearUserTimers(id);
+            return send(msg.chat.id,"⏹ Prediction stopped. No new bets or result checks will be scheduled.",{reply_markup:userMenu(id)});
         }
 
       if(text==="▶️ Start Prediction"){
