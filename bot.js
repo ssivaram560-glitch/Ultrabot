@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
 const zlib        = require('zlib');
+const puppeteer   = require('puppeteer');
 
 // ============================================================
 //  CONFIG
@@ -85,8 +86,8 @@ function clearUserTimers(userId) {
 function cleanupUserResources(userId, removeAccess = false) {
     const key = String(userId);
     clearUserTimers(key);
-    delete resultCheckInFlight[key];
-    delete runInFlight[key];
+    resultCheckInFlight.delete(key);
+    runInFlight.delete(key);
     delete adminState[key];
     delete userAction[key];
     delete userCreds[key];
@@ -782,73 +783,91 @@ function formatPrediction(signal) {
     return "SKIP";
 }
 
-// Local prediction adapter translated from the supplied HTML engine.
-function normalizeDrawHistory(list) {
-    if (!Array.isArray(list)) return [];
-    return list.map(item => {
-        const number = Number.parseInt(item?.number ?? item?.winNumber, 10);
-        return {
-            issueNumber: String(item?.issueNumber || ""),
-            number,
-            side: Number.isInteger(number) ? (number >= 5 ? "BIG" : "SMALL") : ""
-        };
-    }).filter(item => /^\d{8,}$/.test(item.issueNumber) && Number.isInteger(item.number) && item.number >= 0 && item.number <= 9);
+// ============================================================
+// SITE PREDICTION READER — one page, no refresh, no local predictor
+// ============================================================
+const siteReader = {
+    browser: null,
+    page: null,
+    initPromise: null,
+    readPromise: null,
+    last: null,
+    lastSignature: null
+};
+
+async function ensureSitePage() {
+    if (siteReader.page && !siteReader.page.isClosed()) return siteReader.page;
+    if (siteReader.initPromise) return siteReader.initPromise;
+    siteReader.initPromise = (async () => {
+        siteReader.browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+        });
+        const page = await siteReader.browser.newPage();
+        await page.setViewport({ width: 1280, height: 900 });
+        await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36');
+        await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForSelector('.ios-liquid-podium', { timeout: 30000 });
+        siteReader.page = page;
+        return page;
+    })();
+    try { return await siteReader.initPromise; }
+    finally { siteReader.initPromise = null; }
 }
 
-function leastFrequentNumber(history, numbers) {
-    const counts = Object.fromEntries(numbers.map(n => [n, 0]));
-    for (const item of history) if (counts[item.number] !== undefined) counts[item.number]++;
-    return numbers.reduce((best, n) => counts[n] < counts[best] ? n : best, numbers[0]);
+async function closeSiteReader() {
+    const page = siteReader.page;
+    const browser = siteReader.browser;
+    siteReader.page = null;
+    siteReader.browser = null;
+    siteReader.last = null;
+    siteReader.lastSignature = null;
+    try { if (page && !page.isClosed()) await page.close(); } catch {}
+    try { if (browser) await browser.close(); } catch {}
 }
 
-// Local translation of the HTML engine: mirror/streak/alternation/trend,
-// weighted number analysis, gap recovery, and adaptive memory. No site is read.
-function htmlPrediction(history, userId) {
+async function readSitePrediction(targetPeriod) {
+    if (siteReader.last && siteReader.last.period === String(targetPeriod)) return siteReader.last;
+    if (siteReader.readPromise) return siteReader.readPromise;
+    siteReader.readPromise = (async () => {
+        const page = await ensureSitePage();
+        const data = await page.evaluate(() => {
+            const podium = document.querySelector('.ios-liquid-podium');
+            if (!podium) return null;
+            const children = [...podium.children];
+            const side = (children[0]?.textContent || '').trim().toUpperCase();
+            const nums = children[1] ? [...children[1].querySelectorAll('div')]
+                .map(el => Number.parseInt(el.textContent.trim(), 10))
+                .filter(Number.isInteger) : [];
+            const validSide = side === 'BIG' || side === 'SMALL';
+            const validNumber = nums.find(n => n >= 0 && n <= 9);
+            if (!validSide || !Number.isInteger(validNumber)) return null;
+            return { side, number: validNumber, confidence: null, pattern: 'SITE-ULTIMATE-PRO', signature: `${side}:${validNumber}:${podium.innerText}` };
+        });
+        if (!data) throw new Error('Site prediction card is not ready');
+        if (siteReader.lastSignature && siteReader.lastSignature === data.signature) {
+            throw new Error('Waiting for the Jade site to publish the next prediction');
+        }
+        siteReader.lastSignature = data.signature;
+        const result = { ...data, period: String(targetPeriod) };
+        siteReader.last = result;
+        return result;
+    })();
+    try { return await siteReader.readPromise; }
+    finally { siteReader.readPromise = null; }
+}
+
+async function decidePrediction(_list, currentPeriod, userId) {
+    const result = await readSitePrediction(currentPeriod);
     initState(userId);
-    const state = userStates[userId];
-    const h = normalizeDrawHistory(history);
-    if (!h.length) return null;
-
-    const sideScore = { BIG: 0, SMALL: 0 };
-    const sides = h.slice(0, 5).map(x => x.side);
-    if (sides.length >= 5 && sides[0] === sides[4] && sides[1] === sides[3]) {
-        sideScore[sides[0] === "BIG" ? "SMALL" : "BIG"] += 3;
-    }
-    let streak = 1;
-    for (let i = 1; i < h.length && h[i].side === h[i - 1].side; i++) streak++;
-    if (streak >= 4) sideScore[streak >= 6 ? (h[0].side === "BIG" ? "SMALL" : "BIG") : h[0].side] += streak >= 6 ? 4 : 2;
-    const lastFive = h.slice(0, 5).map(x => x.side);
-    if (lastFive.length === 5 && lastFive.every((v, i) => i === 0 || v !== lastFive[i - 1])) {
-        sideScore[lastFive[4] === "BIG" ? "SMALL" : "BIG"] += 3;
-    }
-    let weighted = 0;
-    const weights = [8, 5, 3, 2, 1, 1, 1, 1];
-    h.slice(0, 8).forEach((item, i) => { weighted += (item.number >= 5 ? 1 : -1) * weights[i]; });
-    sideScore[weighted > 0 ? "BIG" : "SMALL"] += 2;
-    const missing = [0,1,2,3,4,5,6,7,8,9].filter(n => !h.slice(0, 15).some(x => x.number === n));
-    if (missing.length) sideScore[missing[0] >= 5 ? "BIG" : "SMALL"] += 1.5;
-    if ((stats[userId]?.lossStreak || 0) >= 2) sideScore[h[0].side === "BIG" ? "SMALL" : "BIG"] += 2;
-
-    const side = sideScore.BIG >= sideScore.SMALL ? "BIG" : "SMALL";
-    // Requested bot mapping: BIG -> 0..4 and SMALL -> 5..9.
-    const allowed = side === "BIG" ? [0,1,2,3,4] : [5,6,7,8,9];
-    const number = leastFrequentNumber(h.slice(0, 15), allowed);
-    const confidence = Math.min(95, 65 + Math.round(Math.abs(sideScore.BIG - sideScore.SMALL) * 5));
-    state.lastPrediction = side;
-    state.lastNumber = number;
-    state.lastReason = "ULTIMATE-PRO-ADAPTIVE";
-    return { side, number, conf: confidence, pat: "ULTIMATE-PRO-ADAPTIVE" };
+    userStates[userId].lastPrediction = result.side;
+    userStates[userId].lastNumber = result.number;
+    userStates[userId].lastReason = result.pattern;
+    const mode = autobetCfg[userId]?.mode || 'SIZE';
+    if (mode === 'SIZE') return { type: 'SIZE', val: result.side, number: result.number, pat: result.pattern, bets: [{ type: 'SIZE', val: result.side, kind: 'size' }] };
+    if (mode === 'NUMBER') return { type: 'NUMBER', val: result.number, size: result.side, pat: result.pattern, bets: [{ type: 'NUMBER', val: result.number, kind: 'number' }] };
+    return { type: 'COMBINED', val: result.side, number: result.number, pat: result.pattern, bets: [{ type: 'SIZE', val: result.side, kind: 'size' }, { type: 'NUMBER', val: result.number, kind: 'number' }] };
 }
-
-async function decidePrediction(list, _currentLevel, userId) {
-    const result = htmlPrediction(list, userId);
-    if (!result) return { skip: true, reason: "INSUFFICIENT_HISTORY" };
-    const mode = autobetCfg[userId]?.mode || "SIZE";
-    if (mode === "SIZE") return { type: "SIZE", val: result.side, number: result.number, conf: result.conf, pat: result.pat, bets: [{ type: "SIZE", val: result.side, kind: "size" }] };
-    if (mode === "NUMBER") return { type: "NUMBER", val: result.number, size: result.side, conf: result.conf, pat: result.pat, bets: [{ type: "NUMBER", val: result.number, kind: "number" }] };
-    return { type: "COMBINED", val: result.side, number: result.number, conf: result.conf, pat: result.pat, bets: [{ type: "SIZE", val: result.side, kind: "size" }, { type: "NUMBER", val: result.number, kind: "number" }] };
-}
-
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initUser(userId);
     if (typeof autobetState !== 'undefined' && autobetState[userId]) {
@@ -1009,7 +1028,7 @@ async function runPredict(userId, chatId) {
     }
 
     initState(userId);
-    const signal = await decidePrediction(list, st.level, userId);
+    const signal = await decidePrediction(list, next, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip) {
         // This should only happen when the API returned no usable numbers.
@@ -1047,7 +1066,7 @@ async function runPredict(userId, chatId) {
 "║ Size    : "+signal.val+"\n"+
 "║ Number  : "+(signal.number ?? signal.bets?.find(b=>b.type==="NUMBER")?.val ?? signal.bets?.find(b=>b.type==="SIZE")?.number ?? "-")+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-"║ Source  : Local HTML Engine\n"+
+"║ Source  : Live Jade site\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
@@ -1753,4 +1772,13 @@ if(text==="🔢 Set Watch Losses"){
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
     });
 }
+const shutdown = async (signal) => {
+    console.log(`[SHUTDOWN] ${signal}`);
+    for (const id of Object.keys(running)) { running[id] = false; clearUserTimers(id); }
+    await closeSiteReader();
+    try { if (bot) await bot.stopPolling(); } catch {}
+    process.exit(0);
+};
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
 startBot();
