@@ -515,9 +515,9 @@ async function fetchCaptcha() {
         const r = await axios.get(CAPTCHA_URL, {
             headers: {
                 "Accept": "application/json, text/plain, */*",
-                "Origin": "https://bdgwin8.vip",
-                "Referer": "https://bdgwin8.vip",
-                "Ar-Origin": "https://bdgwin901.com",
+                "Origin": "https://13lwin19.com",
+                "Referer": "https://13lwin19.com",
+                "Ar-Origin": "https://13lwin19.com",
                 "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36"
             },
             timeout: 10000
@@ -739,9 +739,9 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                     "authorization":    "Bearer " + token,
                     "content-type":     "application/json",
                     "Accept":           "application/json, text/plain, */*",
-                    "Origin":           "https://bdgwin8.vip",
-                    "Referer":          "https://bdgwin8.vip/",
-                    "Ar-Origin":        "https://bdgwin8.vip",
+                    "Origin":           "https://13lwin19.com",
+                    "Referer":          "https://13lwin19.com/",
+                    "Ar-Origin":        "https://13lwin19.com",
                     "Sec-Ch-Ua":        '"Chromium";v="139"',
                     "Sec-Ch-Ua-Mobile": "?1",
                     "Sec-Fetch-Dest":   "empty",
