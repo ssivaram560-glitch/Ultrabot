@@ -770,6 +770,18 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
     }
 }
 
+function formatPrediction(signal) {
+    if (!signal || signal.skip === true) return "SKIP";
+    if (signal.type === "NUMBER") return String(Number(signal.val));
+    if (signal.type === "SIZE") return String(signal.val || "").toUpperCase();
+    if (signal.type === "COMBINED") {
+        const size = String(signal.val || "").toUpperCase();
+        const number = signal.number ?? signal.bets?.find(b => b.type === "NUMBER")?.val;
+        return number === undefined ? size : `${size} OR ${Number(number)}`;
+    }
+    return "SKIP";
+}
+
 // Local prediction adapter translated from the supplied HTML engine.
 function normalizeDrawHistory(list) {
     if (!Array.isArray(list)) return [];
@@ -1367,6 +1379,12 @@ function startBot(){
     bot=new TelegramBot(BOT_TOKEN,{polling:{interval:1000,autoStart:true,params:{timeout:30}}});
     bot.on("polling_error",err=>{
         const msg = err?.message || String(err);
+        if (msg.includes("409") || msg.toLowerCase().includes("terminated by other getupdates request")) {
+            console.error("[POLL] 409 Conflict: another bot instance is using this token. Polling stopped; keep only one deployed instance running.");
+            pollingRecovery = true;
+            bot.stopPolling().catch(() => {});
+            return;
+        }
         if (msg.includes("ECONNRESET") || msg.includes("EFATAL") || msg.includes("socket hang up")) {
             recoverPolling(err);
             return;
@@ -1375,6 +1393,11 @@ function startBot(){
     });
     bot.on("error",err=>{
         const msg = err?.message || String(err);
+        if (msg.includes("409") || msg.toLowerCase().includes("terminated by other getupdates request")) {
+            console.error("[POLL] 409 Conflict: stop the duplicate bot instance, then redeploy this one.");
+            bot.stopPolling().catch(() => {});
+            return;
+        }
         if (msg.includes("ECONNRESET") || msg.includes("EFATAL") || msg.includes("socket hang up")) {
             console.warn("Bot error recovered:", msg);
             return;
