@@ -8,7 +8,7 @@ const puppeteer   = require('puppeteer');
 //  CONFIG
 // ============================================================
 // WARNING: These credentials were shared in chat and should be rotated after deployment.
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8612987433:AAEzFrb5_HplcD1COgVzd9wmxdmfTPi709I";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8687914335:AAEYJ87rtDyqs_4HpFvkOnkU8O9oiEy8PmE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
@@ -21,6 +21,12 @@ const LOGIN_URL   = "https://api.bdg88zf.com/api/webapi/Login";
 const CAPTCHA_URL = "https://api.bdg88zf.com/api/webapi/GetCaptcha";
 const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
 const SITE_URL    = "https://jade-macaron-2490ac.netlify.app/";
+const CHROME_ARGS = [
+    '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
+    '--disable-dev-shm-usage', '--disable-extensions', '--disable-background-networking',
+    '--disable-component-update', '--disable-default-apps', '--no-first-run',
+    '--no-zygote', '--single-process'
+];
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
@@ -432,7 +438,7 @@ async function autoLoginImpl(userId, chatId, silent = false) {
     try {
         browser = await puppeteer.launch({
             headless: true, 
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+            args: CHROME_ARGS
         });
         
         page = await browser.newPage();
@@ -816,7 +822,10 @@ const siteReader = {
     initPromise: null,
     readPromise: null,
     last: null,
-    lastSignature: null
+    lastSignature: null,
+    requestHandler: null,
+    readCount: 0,
+    recycleAfterReads: 20
 };
 
 async function ensureSitePage() {
@@ -825,18 +834,36 @@ async function ensureSitePage() {
     siteReader.initPromise = (async () => {
         siteReader.browser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+            args: CHROME_ARGS
         });
         const page = await siteReader.browser.newPage();
-        await page.setViewport({ width: 1280, height: 900 });
+        await page.setRequestInterception(true);
+        siteReader.requestHandler = request => {
+            const type = request.resourceType();
+            if (type === 'image' || type === 'font' || type === 'media') {
+                request.abort().catch(() => {});
+            } else {
+                request.continue().catch(() => {});
+            }
+        };
+        page.on('request', siteReader.requestHandler);
+        await page.setViewport({ width: 960, height: 640 });
         await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36');
         await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForSelector('.ios-liquid-podium', { timeout: 30000 });
         siteReader.page = page;
         return page;
     })();
-    try { return await siteReader.initPromise; }
-    finally { siteReader.initPromise = null; }
+    try {
+        return await siteReader.initPromise;
+    } catch (error) {
+        // If navigation/selector setup fails, close the partially-created browser
+        // before the next retry; otherwise each retry can orphan a Chromium process.
+        await closeSiteReader();
+        throw error;
+    } finally {
+        siteReader.initPromise = null;
+    }
 }
 
 async function closeSiteReader() {
@@ -846,6 +873,8 @@ async function closeSiteReader() {
     siteReader.browser = null;
     siteReader.last = null;
     siteReader.lastSignature = null;
+    siteReader.requestHandler = null;
+    siteReader.readCount = 0;
     try { if (page && !page.isClosed()) await page.close(); } catch {}
     try { if (browser) await browser.close(); } catch {}
 }
@@ -877,6 +906,11 @@ async function readSitePrediction(targetPeriod) {
         siteReader.lastSignature = data.signature;
         const result = { ...data, period: String(targetPeriod) };
         siteReader.last = result;
+        siteReader.readCount++;
+        if (siteReader.readCount >= siteReader.recycleAfterReads) {
+            // Recycle Chromium periodically so page-side caches/timers cannot grow forever.
+            await closeSiteReader();
+        }
         return result;
     })();
     try { return await siteReader.readPromise; }
