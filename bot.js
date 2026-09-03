@@ -7,11 +7,11 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8612987433:AAEzFrb5_HplcD1COgVzd9wmxdmfTPi709I";
-const OWNER_ID     = 8869874751;
-const OWNER_PASS   = process.env.OWNER_PASS || "2004";
-const ADMIN_HANDLE = "@Sivakutty1";
-const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
+const BOT_TOKEN    = "8977354327:AAFeQk-kqMVfEOwPl4NFgQic4j3jSXdb2EA";
+const OWNER_ID     = 1865939951;
+const OWNER_PASS   = "praveensaran";
+const ADMIN_HANDLE = "@lucifer1570";
+const REG_LINK     = "https://13l.life/register?inviteCode=DDXKKFN&from=web07:33 AM";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
 
@@ -115,6 +115,30 @@ async function logBoth(chatId, msg, isError = false) {
 // ============================================================
 //  HELPERS
 // ============================================================
+//  HTML PREVIEW-LEVEL DATA EXTRACTION HELPERS
+// ============================================================
+function luciferExtractData(json) {
+    if (Array.isArray(json)) return json;
+    if (json && Array.isArray(json.data)) return json.data;
+    if (json && Array.isArray(json.data?.list)) return json.data.list;
+    if (json && Array.isArray(json.results)) return json.results;
+    if (json && Array.isArray(json.records)) return json.records;
+    return null;
+}
+
+function luciferSortNewest(a) {
+    return a.slice().sort((a, b) => {
+        const ai = String(a?.issue ?? a?.issueNumber ?? a?.period ?? "");
+        const bi = String(b?.issue ?? b?.issueNumber ?? b?.period ?? "");
+        if (/^\d+$/.test(ai) && /^\d+$/.test(bi)) {
+            if (ai.length !== bi.length) return bi.length - ai.length;
+            return bi.localeCompare(ai);
+        }
+        return 0;
+    });
+}
+
+// ============================================================
 async function fetchList() {
     try {
         const response = await axios.get(DRAW_URL, {
@@ -122,22 +146,39 @@ async function fetchList() {
             timeout: 10000
         });
         const payload = response.data || {};
-        const rows = Array.isArray(payload.data)
-            ? payload.data
-            : Array.isArray(payload.data?.list) ? payload.data.list : null;
-        if (!Array.isArray(rows) || rows.length === 0) {
+        const arr = luciferExtractData(payload);
+        if (!Array.isArray(arr) || arr.length === 0) {
             console.error("[LUCIFER API] Invalid 1-minute history response");
             return null;
         }
-        return rows.map(row => ({
-            issueNumber: String(row.issueNumber ?? row.period ?? row.issue ?? ""),
-            number: Number(row.number ?? row.winNumber),
-            size: String(row.size || (Number(row.number) >= 5 ? "BIG" : "SMALL")).toUpperCase(),
-            color: String(row.color || "").toUpperCase(),
-            openTime: row.openTime,
-            timestamp: row.timestamp
-        })).filter(row => /^\d+$/.test(row.issueNumber) && Number.isInteger(row.number) && row.number >= 0 && row.number <= 9)
-          .sort((a, b) => BigInt(b.issueNumber) > BigInt(a.issueNumber) ? 1 : BigInt(b.issueNumber) < BigInt(a.issueNumber) ? -1 : 0);
+
+        const normalized = arr.map((x, i) => {
+            if (typeof x === "string" || typeof x === "number") {
+                return {
+                    issueNumber: String(i),
+                    number: Number(String(x).replace(/\D/g, "").slice(-1))
+                };
+            }
+            const rawN = x.number ?? x.result ?? x.resultNumber ?? x.num ?? x.value ?? x.openNumber ?? x.winNumber;
+            const rawI = x.issue ?? x.issueNumber ?? x.period ?? x.periodNumber ?? x.id ?? i;
+            const numStr = String(rawN ?? "").replace(/\D/g, "").slice(-1);
+            return {
+                issueNumber: String(rawI),
+                number: /^[0-9]$/.test(numStr) ? Number(numStr) : NaN,
+                size: String(x.size || ((/^[0-9]$/.test(numStr) && Number(numStr) >= 5) ? "BIG" : "SMALL")).toUpperCase(),
+                color: String(x.color || "").toUpperCase(),
+                openTime: x.openTime,
+                timestamp: x.timestamp
+            };
+        }).filter(row =>
+            /^\d+$/.test(row.issueNumber) &&
+            Number.isInteger(row.number) && row.number >= 0 && row.number <= 9
+        );
+
+        return luciferSortNewest(normalized).map(row => ({
+            ...row,
+            size: row.size && row.size !== "UNDEFINED" ? row.size : (row.number >= 5 ? "BIG" : "SMALL")
+        }));
     } catch (error) {
         console.error("[LUCIFER API ERROR]", error.message);
         return null;
@@ -165,11 +206,23 @@ async function getLiveBalance(userId, chatId = null) {
 
     if (!token) return { success: false, message: "No token" };
 
-    const url = "https://api.ar-lottery01.com/api/Lottery/GetBalance";
+    const baseUrl = "https://api.ar-lottery01.com/api/Lottery/GetBalance";
+    const signedParams = buildBalanceSignedParams();
+    const queryString = new URLSearchParams(signedParams).toString();
+    const url = baseUrl + "?" + queryString;
+
     const headers = {
         "Authorization": "Bearer " + token,
         "Ar-Origin": "https://13lwin19.com",
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
+        "Origin": "https://13lwin19.com",
+        "Referer": "https://13lwin19.com/",
+        "Accept": "application/json, text/plain, */*",
+        "Sec-Ch-Ua": '"Chromium";v="139"',
+        "Sec-Ch-Ua-Mobile": "?1",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36"
     };
 
     try {
@@ -178,7 +231,10 @@ async function getLiveBalance(userId, chatId = null) {
     } catch (e) {
         if (e.response && e.response.status === 405) {
             try {
-                const r2 = await axios.post(url, {}, { headers, timeout: 5000 });
+                const signedParams2 = buildBalanceSignedParams();
+                const queryString2 = new URLSearchParams(signedParams2).toString();
+                const url2 = baseUrl + "?" + queryString2;
+                const r2 = await axios.post(url2, signedParams2, { headers, timeout: 5000 });
                 return await parseBalanceResponse(r2);
             } catch (e2) {
                 const errMsg = e2.response?.data?.msg || e2.message || "API Error";
@@ -315,6 +371,30 @@ function makeBetSign(params) {
     const sorted = {};
     keys.forEach(k=>{ sorted[k]=p[k]===0?0:p[k]; });
     return crypto.createHash('md5').update(JSON.stringify(sorted)).digest('hex').toUpperCase().slice(0,32);
+}
+
+function makeBalanceSign(params) {
+    const p = {...params};
+    delete p.signature; delete p.timestamp;
+    const keys = Object.keys(p).filter(k => {
+        const v = p[k];
+        if (v === null || v === undefined || v === "") return false;
+        if (typeof v === 'object') return false;
+        return true;
+    }).sort();
+    const sorted = {};
+    keys.forEach(k => { sorted[k] = p[k] === 0 ? 0 : p[k]; });
+    return crypto.createHash('md5').update(JSON.stringify(sorted)).digest('hex').toUpperCase().slice(0, 32);
+}
+
+function buildBalanceSignedParams() {
+    const params = {
+        language: "en",
+        random:   Math.floor(Math.random() * 1e12)
+    };
+    const signature = makeBalanceSign(params);
+    const timestamp = Math.floor(Date.now() / 1000);
+    return {...params, signature, timestamp};
 }
 
 // ============================================================
@@ -738,54 +818,77 @@ async function handleLoss(userId, chatId, actual, num, betLevel) {
 }
 
 //  EXISTING CALCULATION ONLY
-//  The Luciferapi SAME/OPPOSITE analysis below is the sole decision source.
+//  The Luciferapi HTML 5-result pattern analysis below is the sole decision source.
+//  Faithful backend port of preview.html → analyze() for 100% parity.
 // ============================================================
+function htmlPatternPredictSide(n) { return Number(n) >= 5 ? "BIG" : "SMALL"; }
 
-// HTML 5-result pattern prediction. Returns only BIG/SMALL; otherwise SKIP.
-// Pattern: R1/R2/R3 exact numbers + R4/R5 BIG/SMALL, with a 60% threshold.
-// ============================================================
 function htmlPatternPredict(list) {
-    if (!Array.isArray(list)) return null;
-    const rows = list.slice().sort((a, b) => {
-        const ai = String(a?.issueNumber ?? a?.issue ?? a?.period ?? "");
-        const bi = String(b?.issueNumber ?? b?.issue ?? b?.period ?? "");
-        if (/^\d+$/.test(ai) && /^\d+$/.test(bi)) {
-            if (ai.length !== bi.length) return bi.length - ai.length;
-            return bi.localeCompare(ai);
-        }
-        return 0;
-    }).map((item, index) => {
-        const raw = item?.number ?? item?.result ?? item?.resultNumber ?? item?.num ?? item?.value ?? item?.winNumber;
-        const number = Number.parseInt(String(raw ?? "").replace(/\D/g, "").slice(-1), 10);
-        return { number, issue: String(item?.issueNumber ?? item?.issue ?? item?.period ?? item?.periodNumber ?? item?.id ?? index) };
-    }).filter(row => Number.isInteger(row.number) && row.number >= 0 && row.number <= 9);
+    if (!Array.isArray(list) || list.length < 5) return null;
 
-    if (rows.length < 5) return null;
-    const side = n => Number(n) >= 5 ? "BIG" : "SMALL";
-    const pattern = `${rows[0].number}|${rows[1].number}|${rows[2].number}|${side(rows[3].number)}|${side(rows[4].number)}`;
+    const results = luciferSortNewest(
+        list.map((x, i) => {
+            if (typeof x === "string" || typeof x === "number") {
+                const numStr = String(x).replace(/\D/g, "").slice(-1);
+                return { number: /^[0-9]$/.test(numStr) ? numStr : null, issue: String(i) };
+            }
+            const rawN = x.number ?? x.result ?? x.resultNumber ?? x.num ?? x.value ?? x.openNumber ?? x.winNumber;
+            const rawI = x.issue ?? x.issueNumber ?? x.period ?? x.periodNumber ?? x.id ?? i;
+            const numStr = String(rawN ?? "").replace(/\D/g, "").slice(-1);
+            return {
+                number: /^[0-9]$/.test(numStr) ? numStr : null,
+                issue: String(rawI)
+            };
+        }).filter(x => x.number !== null && /^[0-9]$/.test(x.number))
+    );
+
+    if (results.length < 5) return null;
+
+    const r1 = results[0].number;
+    const r2 = results[1].number;
+    const r3 = results[2].number;
+    const r4 = results[3].number;
+    const r5 = results[4].number;
+    const sides = [htmlPatternPredictSide(r4), htmlPatternPredictSide(r5)];
+    const pattern = `${r1}|${r2}|${r3}|${sides[0]}|${sides[1]}`;
+
     let big = 0, small = 0;
-    for (let i = 1; i <= rows.length - 5; i++) {
-        const candidate = `${rows[i].number}|${rows[i + 1].number}|${rows[i + 2].number}|${side(rows[i + 3].number)}|${side(rows[i + 4].number)}`;
-        if (candidate !== pattern) continue;
-        side(rows[i - 1].number) === "BIG" ? big++ : small++;
+    const matches = [];
+    for (let i = 1; i <= results.length - 5; i++) {
+        const a = results[i], b = results[i + 1], c = results[i + 2], d = results[i + 3], e = results[i + 4];
+        const p = `${a.number}|${b.number}|${c.number}|${htmlPatternPredictSide(d.number)}|${htmlPatternPredictSide(e.number)}`;
+        if (p === pattern) {
+            const next = results[i - 1];
+            if (!next) continue;
+            const side = htmlPatternPredictSide(next.number);
+            if (side === "BIG") big++; else small++;
+            matches.push({ r1: a.number, r2: b.number, r3: c.number, r4: d.number, r5: e.number, next: next.number, side });
+        }
     }
 
     const total = big + small;
-    const bigPct = total ? big / total * 100 : 0;
-    const smallPct = total ? small / total * 100 : 0;
-    const confidence = Math.max(bigPct, smallPct);
-    if (!total || confidence < 60 || bigPct === smallPct) return null;
+    const bp = total ? big / total * 100 : 0;
+    const sp = total ? small / total * 100 : 0;
+
+    let pred = null;
+    const conf = Math.max(bp, sp);
+    if (total && conf >= 60 && bp !== sp) {
+        pred = bp > sp ? "BIG" : "SMALL";
+    }
+
+    if (!pred) return null;
 
     return {
         type: "SIZE",
-        val: bigPct > smallPct ? "BIG" : "SMALL",
+        val: pred,
         mode: "HTML_PATTERN",
-        calculation: "R1|R2|R3|R4 BIG/SMALL|R5 BIG/SMALL historical match",
+        calculation: "R1|R2|R3 exact nums · R4|R5 BIG/SMALL · historical pattern match (preview.html analyze())",
         pattern,
         matches: total,
-        bigPct,
-        smallPct,
-        confidence: Math.round(confidence * 10) / 10
+        bigPct: bp,
+        smallPct: sp,
+        confidence: Math.round(conf * 10) / 10,
+        historicalMatches: matches
     };
 }
 
