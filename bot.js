@@ -633,6 +633,13 @@ function sizeOf(row) {
     return Number.isInteger(number) && number >= 5 ? "B" : Number.isInteger(number) ? "S" : null;
 }
 
+function nextIssueNumber(list) {
+    const latest = Array.isArray(list) ? list[0]?.issueNumber : null;
+    if (latest === null || latest === undefined || !/^\d+$/.test(String(latest))) return null;
+    try { return (BigInt(String(latest)) + 1n).toString(); }
+    catch { return null; }
+}
+
 function buildBSFromList(list, count = 15) {
     if (!Array.isArray(list)) return [];
     return list.slice(0, count).map(row => sizeOf(row) || (Number(row.number) >= 5 ? "B" : "S")).reverse();
