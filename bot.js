@@ -625,6 +625,14 @@ function initState(userId) {
     if (state.currentMode !== "SAME" && state.currentMode !== "OPPOSITE") state.currentMode = null;
 }
 
+function sizeOf(row) {
+    const raw = String(row?.size ?? row?.bigSmall ?? row?.type ?? "").toUpperCase();
+    if (raw === "BIG" || raw === "B") return "B";
+    if (raw === "SMALL" || raw === "S") return "S";
+    const number = Number.parseInt(row?.number ?? row?.winNumber ?? row?.result ?? "", 10);
+    return Number.isInteger(number) && number >= 5 ? "B" : Number.isInteger(number) ? "S" : null;
+}
+
 function buildBSFromList(list, count = 15) {
     if (!Array.isArray(list)) return [];
     return list.slice(0, count).map(row => sizeOf(row) || (Number(row.number) >= 5 ? "B" : "S")).reverse();
