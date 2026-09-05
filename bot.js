@@ -7,18 +7,18 @@ const puppeteer   = require('puppeteer');
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    = "8977354327:AAEFWMHiqhcO7UZWEDghMNyd2yPWF7aa7mc";
-const OWNER_ID     = 1865939951;
-const OWNER_PASS   = "praveensaran";
-const ADMIN_HANDLE = "@lucifer1570";
-const REG_LINK     = "https://www.ts777.co/";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8871633438:AAEX-aqEKqXK50Qh7O0SnNq45C3aSatKBAA";
+const OWNER_ID     = 8869874751;
+const OWNER_PASS   = process.env.OWNER_PASS || "2004";
+const ADMIN_HANDLE = "@Sivakutty1";
+const REG_LINK     = "https://13l.life/register?inviteCode=DDXKKFN&from=web07:33 AM";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
 
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
-const LOGIN_URL   = "https://www.ts777.co/api/Home/Login";
-const CAPTCHA_URL = "https://www.ts777.co/api/Home/Captcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
+const LOGIN_URL   = "https://13llottery.com/api/Home/Login";
+const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
+const DRAW_URL    = "https://luciferapi.com/";
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
@@ -166,7 +166,7 @@ async function fetchList() {
                 issueNumber: String(rawI),
                 number: /^[0-9]$/.test(numStr) ? Number(numStr) : NaN,
                 size: String(x.size || ((/^[0-9]$/.test(numStr) && Number(numStr) >= 5) ? "BIG" : "SMALL")).toUpperCase(),
-                color: String(x.color ?? x.colour ?? "").toUpperCase(),
+                color: String(x.color || "").toUpperCase(),
                 openTime: x.openTime,
                 timestamp: x.timestamp
             };
@@ -213,9 +213,9 @@ async function getLiveBalance(userId, chatId = null) {
 
     const headers = {
         "Authorization": "Bearer " + token,
-        "Ar-Origin": "https://www.ts777.co",
-        "Origin": "https://www.ts777.co",
-        "Referer": "https://www.ts777.co/",
+        "Ar-Origin": "https://13lwin19.com",
+        "Origin": "https://13lwin19.com",
+        "Referer": "https://13lwin19.com/",
         "Accept": "application/json, text/plain, */*",
         "Sec-Ch-Ua": '"Chromium";v="139"',
         "Sec-Ch-Ua-Mobile": "?1",
@@ -249,7 +249,7 @@ async function getLiveBalance(userId, chatId = null) {
 function initUser(id) {
     if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0,levelStats:{} };
     if (!stats[id].levelStats || typeof stats[id].levelStats !== "object") stats[id].levelStats = {};
-    if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, activeRule:null, lastPrediction:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -405,9 +405,9 @@ async function fetchCaptcha() {
         const r = await axios.get(CAPTCHA_URL, {
             headers: {
                 "Accept": "application/json, text/plain, */*",
-                "Origin": "https://www.ts777.co",
-                "Referer": "https://www.ts777.co",
-                "Ar-Origin": "https://www.ts777.co",
+                "Origin": "https://13lwin19.com",
+                "Referer": "https://13lwin19.com",
+                "Ar-Origin": "https://13lwin19.com",
                 "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36"
             },
             timeout: 10000
@@ -458,7 +458,7 @@ async function autoLogin(userId, chatId, silent = false) {
             req.continue();
         });
 
-        await page.goto('https://www.ts777.co/login', { waitUntil: 'domcontentloaded', timeout: 90000 });
+        await page.goto('https://13llottery.com/login', { waitUntil: 'domcontentloaded', timeout: 90000 });
         await page.waitForSelector('input', { timeout: 30000 });
         const inputs = await page.$$('input');
         if (inputs.length < 2) throw new Error("Login inputs not found");
@@ -588,9 +588,9 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
                     "authorization":    "Bearer " + token,
                     "content-type":     "application/json",
                     "Accept":           "application/json, text/plain, */*",
-                    "Origin":           "https://www.ts777.co",
-                    "Referer":          "https://www.ts777.co/",
-                    "Ar-Origin":        "https://www.ts777.co",
+                    "Origin":           "https://13lwin19.com",
+                    "Referer":          "https://13lwin19.com/",
+                    "Ar-Origin":        "https://13lwin19.com",
                     "Sec-Ch-Ua":        '"Chromium";v="139"',
                     "Sec-Ch-Ua-Mobile": "?1",
                     "Sec-Fetch-Dest":   "empty",
@@ -695,16 +695,16 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
 function initState(userId) {
     initUser(userId);
     if (!userStates[userId]) {
-        userStates[userId] = { resultHistory: [], skipCount: 0, currentMode: null, activeRule: null, lastPrediction: null };
+        userStates[userId] = { resultHistory: [], skipCount: 0, currentMode: null, mode: "NORMAL", history: [], lastPrediction: null };
     }
     const state = userStates[userId];
     if (!Array.isArray(state.resultHistory)) state.resultHistory = [];
+    if (!Array.isArray(state.history)) state.history = [];
+    if (state.mode !== "NORMAL" && state.mode !== "RECOVERY") state.mode = "NORMAL";
     if (typeof state.skipCount !== "number") state.skipCount = 0;
     if (state.currentMode === undefined) state.currentMode = null;
-    if (state.activeRule === undefined) state.activeRule = null;
     if (state.lastPrediction === undefined) state.lastPrediction = null;
-    if (state.currentMode !== "RULE1" && state.currentMode !== "RULE2") state.currentMode = null;
-    if (state.activeRule !== "RULE1" && state.activeRule !== "RULE2") state.activeRule = null;
+    if (state.currentMode !== "SAME" && state.currentMode !== "OPPOSITE") state.currentMode = null;
 }
 
 function sizeOf(row) {
@@ -736,16 +736,31 @@ function updateAfterResult(userId, wasWin, actualSize, betPlaced, usedMode) {
     state.resultHistory.push(bs);
     if (state.resultHistory.length > 50) state.resultHistory.shift();
 
-    // A win unlocks the rule. A loss keeps the same rule locked until it wins.
-    if (wasWin) {
-        state.activeRule = null;
-        state.currentMode = null;
-    } else if (usedMode === "RULE1" || usedMode === "RULE2") {
-        state.activeRule = usedMode;
-        state.currentMode = usedMode;
+    // Exact source NORMAL/RECOVERY pattern history: every resolved
+    // prediction is recorded; only Martingale state depends on betPlaced.
+    {
+        state.history.push(wasWin ? "W" : "L");
+        const histStr = state.history.join(",");
+        const isRecoveryPattern = histStr.endsWith("W,W,L") ||
+            histStr.endsWith("W,W,W,L") || /(L,L,L,L+)/.test(histStr);
+        const isNormalPattern = histStr.endsWith("W,L") ||
+            /(W,W,W,W+),L$/.test(histStr);
+
+        if (isRecoveryPattern || isNormalPattern) {
+            if (state.mode === "RECOVERY" && wasWin) state.mode = "NORMAL";
+            else if (isRecoveryPattern) state.mode = "RECOVERY";
+            else state.mode = "NORMAL";
+            state.history = [];
+            console.log(`[PATTERN] ${state.mode} pattern matched; history cleared`);
+        }
+        if (state.history.length > 10) state.history.shift();
     }
 
-    // Watch/failed-bet results must not alter martingale state.
+    // Prediction direction always follows the result, even for WATCH results.
+    // A win keeps the analysis direction; a loss reverses it next time.
+    state.currentMode = wasWin ? "SAME" : "OPPOSITE";
+
+    // Watch/failed-bet results must not alter martingale betting state.
     if (!betPlaced) return;
 
     // A placed-bet win resets the martingale sequence to level 1.
@@ -821,77 +836,75 @@ async function handleLoss(userId, chatId, actual, num, betLevel) {
     await sendSticker(chatId, LOSS_STICKER);
 }
 
-//  EXISTING CALCULATION ONLY
-//  The legacy Luciferapi HTML 5-result helper remains available for compatibility.
 // ============================================================
-function htmlPatternPredictSide(n) { return Number(n) >= 5 ? "BIG" : "SMALL"; }
-
-function htmlPatternPredict(list) {
-    if (!Array.isArray(list) || list.length < 5) return null;
-
-    const results = luciferSortNewest(
-        list.map((x, i) => {
-            if (typeof x === "string" || typeof x === "number") {
-                const numStr = String(x).replace(/\D/g, "").slice(-1);
-                return { number: /^[0-9]$/.test(numStr) ? numStr : null, issue: String(i) };
-            }
-            const rawN = x.number ?? x.result ?? x.resultNumber ?? x.num ?? x.value ?? x.openNumber ?? x.winNumber;
-            const rawI = x.issue ?? x.issueNumber ?? x.period ?? x.periodNumber ?? x.id ?? i;
-            const numStr = String(rawN ?? "").replace(/\D/g, "").slice(-1);
-            return {
-                number: /^[0-9]$/.test(numStr) ? numStr : null,
-                issue: String(rawI)
-            };
-        }).filter(x => x.number !== null && /^[0-9]$/.test(x.number))
-    );
-
-    if (results.length < 5) return null;
-
-    const r1 = results[0].number;
-    const r2 = results[1].number;
-    const r3 = results[2].number;
-    const r4 = results[3].number;
-    const r5 = results[4].number;
-    const sides = [htmlPatternPredictSide(r4), htmlPatternPredictSide(r5)];
-    const pattern = `${r1}|${r2}|${r3}|${sides[0]}|${sides[1]}`;
-
-    let big = 0, small = 0;
-    const matches = [];
-    for (let i = 1; i <= results.length - 5; i++) {
-        const a = results[i], b = results[i + 1], c = results[i + 2], d = results[i + 3], e = results[i + 4];
-        const p = `${a.number}|${b.number}|${c.number}|${htmlPatternPredictSide(d.number)}|${htmlPatternPredictSide(e.number)}`;
-        if (p === pattern) {
-            const next = results[i - 1];
-            if (!next) continue;
-            const side = htmlPatternPredictSide(next.number);
-            if (side === "BIG") big++; else small++;
-            matches.push({ r1: a.number, r2: b.number, r3: c.number, r4: d.number, r5: e.number, next: next.number, side });
-        }
+// EXACT FORMULA PREDICTION LOGIC
+// next period last 3 digits × exp(current result)
+// 0-4 = SMALL, 5-9 = BIG. First prediction uses the analysis itself.
+// After a win, keep SAME mode; after a loss, use OPPOSITE mode.
+// ============================================================
+function formulaPredict(list, userId) {
+    if (!list || list.length < 2) {
+        return null;
     }
 
-    const total = big + small;
-    const bp = total ? big / total * 100 : 0;
-    const sp = total ? small / total * 100 : 0;
+    initState(userId);
+    const state = userStates[userId];
+    const sourceMode = state.mode;
+    // currentMode is the prediction state: SAME is the default, while
+    // OPPOSITE is enabled only after the previous prediction lost.
+    const predictionMode = state.currentMode === "OPPOSITE" ? "OPPOSITE" : "SAME";
 
-    let pred = null;
-    const conf = Math.max(bp, sp);
-    if (total && conf >= 60 && bp !== sp) {
-        pred = bp > sp ? "BIG" : "SMALL";
-    }
+    // ═════════════════════════════════════════════════════════════════════
+    //  L3+: FORCED WIN
+    // ═════════════════════════════════════════════════════════════════════
+    
 
-    if (!pred) return null;
 
-    return {
-        type: "SIZE",
-        val: pred,
-        mode: "HTML_PATTERN",
-        calculation: "R1|R2|R3 exact nums · R4|R5 BIG/SMALL · historical pattern match (preview.html analyze())",
-        pattern,
-        matches: total,
-        bigPct: bp,
-        smallPct: sp,
-        confidence: Math.round(conf * 10) / 10,
-        historicalMatches: matches
+    // ═════════════════════════════════════════════════════════════════════
+    //  L1-L2: NORMAL OR RECOVERY MODE
+    // ═════════════════════════════════════════════════════════════════════
+
+    const currentPeriod = String(list[0].issueNumber);
+    const currentResult = parseInt(list[0].number || list[0].winNumber || 0);
+
+
+// Previous result 0னா prediction வேண்டாம்
+if (currentResult === 0) {
+    return null;
+}
+
+    // STEP 1: Calculate next period
+    const nextPeriodNum = BigInt(currentPeriod) + 1n;
+    const nextPeriod = nextPeriodNum.toString();
+    const nextLast3Num = parseInt(nextPeriod.slice(-3));
+
+    // STEP 2: Calculate: NEXT_LAST_3 × exp(CURRENT_RESULT)
+    const answer = nextLast3Num * Math.exp(currentResult);
+
+    // STEP 3: Get 14 digits (remove decimal, take first 14)
+    const answerStr = answer.toString();
+    const noDecimal = answerStr.replace('.', '');
+    const first14 = noDecimal.substring(0, 14);
+
+    // STEP 4: Get last digit
+    const lastDigit = parseInt(first14.charAt(first14.length - 1));
+
+    // STEP 5: Analysis result from the calculated digit
+    const analysis = lastDigit <= 4 ? 'SMALL' : 'BIG';
+
+    // STEP 6: SAME state uses analysis itself. Only a loss enables opposite.
+    const prediction = predictionMode === "OPPOSITE"
+        ? (analysis === 'BIG' ? 'SMALL' : 'BIG')
+        : analysis;
+
+    return { 
+        type: 'SIZE', 
+        val: prediction, 
+        conf: 90, 
+        pat: sourceMode,
+        mode: predictionMode,
+        analysis,
+        calculation: `(${nextLast3Num} × exp(${currentResult})) → ${lastDigit} → analysis:${analysis} → ${predictionMode} prediction:${prediction}` 
     };
 }
 
@@ -918,26 +931,16 @@ function stk(arr, key) {
     return { val, count };
 }
 
-function rulePatternPredict(list, activeRule) {
-    if (!Array.isArray(list) || list.length < 3) return null;
-    const latestResults = list.slice(0, 3);
-    if (latestResults.some(row => String(row?.color ?? "").toUpperCase().includes("VIOLET"))) return null;
-    const latest = latestResults.map(sizeOf);
-    if (latest.some(size => !size)) return null;
-
-    const pattern = latest.join("");
-    const rule = activeRule || (pattern === "BBB" ? "RULE1" : pattern === "SSS" ? "RULE2" : null);
-    if (!rule) return null;
-    const requiredPattern = rule === "RULE1" ? "BBB" : "SSS";
-    if (pattern !== requiredPattern) return null;
-
-    return {
-        type: "SIZE",
-        val: rule === "RULE1" ? "BIG" : "SMALL",
-        mode: rule,
-        calculation: `${requiredPattern} rule`,
-        pattern
-    };
+function sourceShouldBet(userId) {
+    initState(userId);
+    const state = userStates[userId];
+    if (!state.history || state.history.length === 0) return false;
+    const histStr = state.history.join(",");
+    const isRecoveryPattern = histStr.endsWith("W,W,L") ||
+        histStr.endsWith("W,W,W,L") || /(L,L,L,L+)/.test(histStr);
+    const isNormalPattern = histStr.endsWith("W,L") ||
+        /(W,W,W,W+),L$/.test(histStr);
+    return state.mode === "RECOVERY" || isRecoveryPattern || isNormalPattern;
 }
 
 async function runPredict(userId, chatId) {
@@ -966,16 +969,16 @@ async function runPredict(userId, chatId) {
     if(sentPeriods[userId].has(next)) return schedulePrediction(userId, chatId, 2000);
     sentPeriods[userId].add(next);
 
-    // Start only on BBB/SSS, then keep the selected rule locked until it wins.
-    const signal = rulePatternPredict(list, state.activeRule);
+    // Live decision uses the exact source formula and source mode patterns.
+    const signal = formulaPredict(list, userId);
     if (!signal) {
-        await send(chatId, "⏭️ SKIP — Waiting for the active rule pattern.");
+        await send(chatId, "⏭️ SKIP — No matching BIG/SMALL pattern with 60% confidence.");
         return schedulePrediction(userId, chatId, 5000);
     }
-    signal.predictionDetails = { liveDecision: "three-result-rule", calculation: signal.calculation };
-    console.log(`[RULE LIVE] ${signal.mode} ${signal.val} pattern=${signal.pattern}`);
-    state.activeRule = signal.mode;
-    state.currentMode = signal.mode;
+    signal.calculationMode = signal.mode;
+    signal.calculationConfidence = signal.confidence;
+    signal.predictionDetails = { liveDecision: "exact-formula", calculation: signal.calculation };
+    console.log(`[FORMULA LIVE] ${signal.val} mode=${signal.mode} ${signal.calculation}`);
     state.lastPrediction = signal.val;
     // Snapshot the level used for this prediction before any result update.
     // The martingale state is the single source of truth for the level.
@@ -985,6 +988,7 @@ async function runPredict(userId, chatId) {
 
     // Only the explicit AutoBet toggle controls whether a bet is sent.
     // `running[userId]` remains the master emergency stop.
+    // Always attempt a bet whenever AutoBet is enabled.
     const canBet = cfg.enabled === true;
     const effectiveLevel = predictionLevel;
     const curBet = Number(cfg.customBets[effectiveLevel - 1] || (cfg.baseBet * MULT[effectiveLevel - 1]) || 0);
@@ -1011,8 +1015,13 @@ async function runPredict(userId, chatId) {
         if (result && result.ok) {
             betPlaced = true;
             await send(chatId, "✅ Bet placed successfully | L" + effectiveLevel + "\n⏳ Checking result...");
-        } else if (result && !result.ok) {
-            await send(chatId, "❌ Bet Failed: " + (result.msg || "Unknown error"));
+        } else {
+            // Bet was not confirmed/placed: mark this period as WATCH, not BET.
+            const reason = result?.msg || "Bet could not be placed";
+            await send(chatId,
+                "👀 WATCH — Bet not placed | L" + effectiveLevel +
+                "\nReason: " + reason +
+                "\nPrediction will be tracked without staking.");
         }
     }
 
@@ -1557,7 +1566,6 @@ if(text==="🔢 Set Watch Losses"){
             running[id]=true;sentPeriods[id]=new Set();
             autobetState[id]={level:1,consecutiveLoss:0,inMart:false,isWaiting:false,nextStartTime:null};
             initState(id);
-            userStates[id].activeRule=null;
             userStates[id].currentMode=null;
             userStates[id].lastPrediction=null;
 
