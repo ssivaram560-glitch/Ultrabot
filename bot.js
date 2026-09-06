@@ -64,6 +64,8 @@ let userTokens = {};
 let userStates = {};
 const predictionTimers = new Map();
 const resultIntervals = new Map();
+const pendingPredictionLevels = new Map();
+const statsMessages = new Map();
 
 function schedulePrediction(userId, chatId, delayMs) {
     const key = String(userId);
@@ -85,6 +87,9 @@ function clearUserTimers(userId) {
     const resultInterval = resultIntervals.get(key);
     if (resultInterval) clearInterval(resultInterval);
     resultIntervals.delete(key);
+    for (const pendingKey of pendingPredictionLevels.keys()) {
+        if (pendingKey.startsWith(key + ":")) pendingPredictionLevels.delete(pendingKey);
+    }
 }
 
 function stopResultInterval(userId, interval) {
@@ -991,6 +996,7 @@ async function runPredict(userId, chatId) {
     // Always attempt a bet whenever AutoBet is enabled.
     const canBet = cfg.enabled === true;
     const effectiveLevel = predictionLevel;
+    pendingPredictionLevels.set(`${String(userId)}:${String(next)}`, effectiveLevel);
     const curBet = Number(cfg.customBets[effectiveLevel - 1] || (cfg.baseBet * MULT[effectiveLevel - 1]) || 0);
     const abLine = (canBet ? "💰 BET " : "👀 WATCH ") + "L" + effectiveLevel + ": ₹" + curBet;
 
@@ -1025,7 +1031,7 @@ async function runPredict(userId, chatId) {
         }
     }
 
-    checkResult(userId, chatId, next, signal.val, signal.type, betPlaced, signal.mode, effectiveLevel);
+    checkResult(userId, chatId, next, signal.val, signal.type, betPlaced, signal.mode, Number(effectiveLevel));
 }
 // ============================================================
 //  RESULT CHECKER
@@ -1060,9 +1066,12 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
         else actual = num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN";
         
         const win = predicted === actual;
-        // Use the level shown with this prediction, even when AutoBet is OFF or the bet fails.
-        const maxBetLevel = Math.max(1, Math.min(10, Number(cfg.maxLvl) || 1));
-        const betLevel = Math.max(1, Math.min(maxBetLevel, Number(predictionLevel) || Number(st.level) || 1));
+        // Use the immutable level saved when this period was predicted.
+        const levelKey = `${String(userId)}:${String(target)}`;
+        const savedLevel = pendingPredictionLevels.get(levelKey);
+        pendingPredictionLevels.delete(levelKey);
+        const capturedLevel = Number(savedLevel ?? predictionLevel);
+        const betLevel = Number.isInteger(capturedLevel) && capturedLevel >= 1 ? capturedLevel : 1;
 
         // Keep the mode after a win; switch SAME <-> OPPOSITE after a loss.
         updateAfterResult(userId, win, actual, betPlaced, usedMode);
@@ -1083,6 +1092,8 @@ async function checkResult(userId, chatId, target, predicted, predType, betPlace
             s.loss++; s.lossStreak++; s.winStreak = 0;
             if (s.lossStreak > s.maxLossStreak) s.maxLossStreak = s.lossStreak;
         }
+
+        await updateLiveStats(userId, chatId);
 
         if (betPlaced) {
             // BET RESULT DASHBOARD
@@ -1136,23 +1147,30 @@ function showStats(chatId,userId){
     initUser(userId);
     const d=stats[userId], rate=d.total?((d.win/d.total)*100).toFixed(1):"0.0";
     const bar="🟦".repeat(d.total?Math.round(d.win/d.total*10):0)+"⬜".repeat(d.total?10-Math.round(d.win/d.total*10):10);
-    const observedLevels = Object.keys(d.levelStats || {}).map(Number).filter(Number.isFinite);
-    const maxLevel = observedLevels.length ? Math.max(...observedLevels) : 1;
-    const levelLines = [];
-    for (let level = 1; level <= maxLevel; level++) {
-        const x = d.levelStats[level] || { predictions: 0, wins: 0, losses: 0 };
-        const wins = Number(x.wins) || 0;
-        const losses = Number(x.losses) || 0;
-        const predictions = Number(x.predictions) || (wins + losses);
-        levelLines.push(`L${level}: ${wins}W / ${losses}L (${predictions} predictions)`);
-    }
-    send(chatId,
+    const levelLines = Object.entries(d.levelStats || {})
+        .filter(([, value]) => Number(value?.wins) > 0)
+        .sort(([a], [b]) => Number(a) - Number(b))
+        .map(([level, value]) => `L${level}:${Number(value.wins)}`);
+    const text =
         "📊 STATS\n\n"+
         "Total: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nAcc: "+rate+"%\n"+bar+"\n\n"+
-        "🏆 LEVEL WINS\n"+levelLines.join("\n")+"\n\n"+
-        "Current Mode: "+(userStates[userId]?.currentMode || "L1 START")+"\n"+
-        "Best Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak"
-    );
+        "🏆 LEVEL WINS\n"+(levelLines.length ? levelLines.join("\n") : "No level wins yet")+"\n\n"+
+        "Current Level: L"+(autobetState[userId]?.level || 1)+"\n"+
+        "Best Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak";
+    send(chatId, text).then(message => {
+        if (message?.message_id) statsMessages.set(String(userId), { chatId: String(chatId), messageId: message.message_id });
+    });
+}
+
+async function updateLiveStats(userId, chatId) {
+    const saved = statsMessages.get(String(userId));
+    if (!saved || !bot) return;
+    initUser(userId);
+    const d=stats[userId], rate=d.total?((d.win/d.total)*100).toFixed(1):"0.0";
+    const bar="🟦".repeat(d.total?Math.round(d.win/d.total*10):0)+"⬜".repeat(d.total?10-Math.round(d.win/d.total*10):10);
+    const levelLines=Object.entries(d.levelStats || {}).filter(([,v])=>Number(v?.wins)>0).sort(([a],[b])=>Number(a)-Number(b)).map(([level,v])=>`L${level}:${Number(v.wins)}`);
+    const text="📊 STATS\n\nTotal: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nAcc: "+rate+"%\n"+bar+"\n\n🏆 LEVEL WINS\n"+(levelLines.length?levelLines.join("\n"):"No level wins yet")+"\n\nCurrent Level: L"+(autobetState[userId]?.level||1)+"\nBest Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak";
+    try { await bot.editMessageText(text, { chat_id: saved.chatId, message_id: saved.messageId }); } catch (e) {}
 }
 async function profitReport(chatId,userId){
     initUser(userId);
