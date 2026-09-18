@@ -639,10 +639,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 //  CONFIG
 // ============================================================
 // Keep secrets outside the source code.
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8999335291:AAE9-MaEm-8fNwcmOlZ-cxNs4BcSMz3MKCA";
-const OWNER_ID     = 1865939951;
-const OWNER_PASS   = "praveensaran";
-const ADMIN_HANDLE = "@lucifer1570";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8670635800:AAEeDoWmav3IL5Pj19shmaSfTHNuLjaT9Lw";
+const OWNER_ID     = 8869874751;
+const OWNER_PASS   = process.env.OWNER_PASS || "2004";
+const ADMIN_HANDLE = "@Sivakutty1";
 const REG_LINK     = "https://www.ts777.co";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
@@ -1478,7 +1478,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    "WinGo_1M", 
+                gameCode:    "WinGo_30S", 
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -1644,7 +1644,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [] };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -1989,71 +1989,116 @@ function cfgForPredictionMode(userId) {
     return String(autobetCfg[userId]?.mode || 'SIZE').toUpperCase();
 }
 
-async function decidePrediction(list, currentPeriod, userId) {
-    initState(userId);
-    const history = Array.isArray(list) ? list.slice().sort((a, b) => {
-        const ai = String(a?.issueNumber ?? a?.issue ?? '');
-        const bi = String(b?.issueNumber ?? b?.issue ?? '');
-        if (/^\d+$/.test(ai) && /^\d+$/.test(bi)) {
-            if (ai.length !== bi.length) return bi.length - ai.length;
-            return bi.localeCompare(ai);
-        }
-        return 0;
-    }) : [];
+function getResultNumber(item) {
+    const raw = item?.number ?? item?.winNumber ?? item?.result ?? item?.resultNumber;
+    const n = Number.parseInt(String(raw ?? '').trim(), 10);
+    return Number.isInteger(n) && n >= 0 && n <= 9 ? n : null;
+}
 
-    const latest = history.length ? latestResultNumber(history[0]) : null;
-    if (latest === null) return { skip: true, reason: 'API returned no valid latest result' };
+function getSizeFromNumber(n) {
+    return n >= 5 ? 'BIG' : 'SMALL';
+}
 
-    const consecutiveCheck = getConsecutivePairCheck(history);
-    if (consecutiveCheck.consecutive) {
-        const key = `${String(history[0]?.issueNumber ?? history[0]?.issue ?? '')}|${consecutiveCheck.pair}`;
-        if (key !== consecutiveSkipTriggerKey) {
-            consecutiveSkipTriggerKey = key;
-            consecutiveSkipRemaining = 2;
-        }
+function getLatestTwoPattern(list) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    const latestNumber = getResultNumber(list[0]);
+    const previousNumber = getResultNumber(list[1]);
+    if (latestNumber === null || previousNumber === null) return null;
 
-        if (consecutiveSkipRemaining > 0) {
-            consecutiveSkipRemaining--;
-            return {
-                skip: true,
-                reason: `CONSECUTIVE SKIP ⏭️ — ${consecutiveCheck.pair} → ${consecutiveSkipRemaining} skip(s) remaining`,
-                consecutiveCheck,
-                consecutiveSkipRemaining
-            };
-        }
-    }
+    const latestSize = getSizeFromNumber(latestNumber);
+    const previousSize = getSizeFromNumber(previousNumber);
+    const pair = `${previousSize === 'BIG' ? 'B' : 'S'}${latestSize === 'BIG' ? 'B' : 'S'}`;
+    const isSame = latestSize === previousSize;
 
-    const skipCheck = shouldSkipByThreeMatches(latest, history);
-    const pairCheck = shouldSkipByPairMatch(history);
-    if (skipCheck.skip || pairCheck.skip) {
-        return {
-            skip: true,
-            reason: [skipCheck.skip ? `3-MATCH: ${skipCheck.reason}` : null, pairCheck.skip ? `PAIR: ${pairCheck.reason}` : null].filter(Boolean).join(' | '),
-            skipMatches: skipCheck.matches,
-            pairCheck
-        };
-    }
-
-    const selected = getPredictionSelection(latest, history);
-    if (!selected) return { skip: true, reason: 'API returned no valid opposite-size number' };
-
-    const [size, number] = selected.mapping;
-    userStates[userId].lastPrediction = size;
-    userStates[userId].lastNumberPrediction = number;
-    userStates[userId].lastPredictionNumber = latest;
-    userStates[userId].lastSelectionMode = selected.mode;
-    console.log(`[SAME-NUMBER SWAP] last=${latest} mode=${selected.mode} -> ${size} ${number} | ${selected.decisionReason}`);
     return {
-        type: 'COMBINED',
-        val: size,
-        number,
-        pat: 'MATCHED SAME-LAST-RESULT HISTORY',
-        mode: selected.mode,
-        decisionReason: selected.decisionReason,
-        bets: [
-            { type: 'SIZE', val: size, kind: 'size' },
-            { type: 'NUMBER', val: number, kind: 'number' }
-        ]
+        latestNumber,
+        previousNumber,
+        latestSize,
+        previousSize,
+        pair,
+        rule: isSame ? 'SAME' : 'OPPOSITE',
+        prediction: isSame ? latestSize : (latestSize === 'BIG' ? 'SMALL' : 'BIG')
+    };
+}
+
+function calculatePastedRecoveryPrediction(list, currentResult) {
+    const currentPeriod = String(list[0]?.issueNumber ?? list[0]?.issue ?? '');
+    if (!/^\d+$/.test(currentPeriod) || !Number.isInteger(currentResult) || currentResult === 0) {
+        return null;
+    }
+
+    let nextPeriod;
+    try {
+        nextPeriod = (BigInt(currentPeriod) + 1n).toString();
+    } catch (_) {
+        return null;
+    }
+
+    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
+    const answer = nextLast3Num * Math.exp(currentResult);
+    const noDecimal = String(answer).replace('.', '');
+    const first14 = noDecimal.substring(0, 14);
+    const lastDigit = Number.parseInt(first14.charAt(first14.length - 1), 10);
+    if (!Number.isInteger(lastDigit)) return null;
+
+    return {
+        prediction: lastDigit <= 4 ? 'SMALL' : 'BIG',
+        lastDigit,
+        nextLast3Num,
+        reason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit}`
+    };
+}
+
+function decidePrediction(list, currentLevel, userId) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+
+    initState(userId);
+    const state = userStates[userId];
+    if (!Array.isArray(state.history)) state.history = [];
+    if (!Number.isInteger(state.lossStreak)) state.lossStreak = 0;
+
+    const pair = getLatestTwoPattern(list);
+    if (!pair) return { skip: true, reason: 'Latest 2 results are unavailable' };
+
+    const recoveryRequired = state.pastedMode === true;
+    let prediction;
+    let predictionMode;
+    let decisionReason;
+
+    if (recoveryRequired) {
+        const recovery = calculatePastedRecoveryPrediction(list, pair.latestNumber);
+        if (!recovery) return { skip: true, reason: 'Recovery calculation unavailable' };
+        prediction = recovery.prediction;
+        // pasted_content_2 explicitly reverses the calculated result in RECOVERY mode.
+        if (state.mode === 'RECOVERY') {
+            prediction = prediction === 'SMALL' ? 'BIG' : 'SMALL';
+        }
+        predictionMode = 'RECOVERY';
+        decisionReason = `3+ consecutive losses; pasted logic ${recovery.reason}` +
+            (state.mode === 'RECOVERY' ? ' + recovery opposite' : '');
+    } else {
+        // BS/SB => opposite of the latest result; BB/SS => same as the latest result.
+        prediction = pair.prediction;
+        predictionMode = 'NORMAL';
+        decisionReason = `${pair.pair}: ${pair.rule === 'SAME' ? 'same' : 'opposite'} as latest ${pair.latestSize}`;
+    }
+
+    state.mode = predictionMode;
+    state.lastPrediction = prediction;
+    state.lastPredictionNumber = pair.latestNumber;
+    state.lastSelectionMode = predictionMode;
+    state.lastPattern = pair.pair;
+    state.lastDecisionReason = decisionReason;
+
+    return {
+        type: 'SIZE',
+        val: prediction,
+        conf: recoveryRequired ? 90 : 85,
+        pat: predictionMode,
+        mode: predictionMode,
+        pattern: pair.pair,
+        decisionReason,
+        bets: [{ type: 'SIZE', val: prediction, kind: 'size' }]
     };
 }
 
@@ -2068,23 +2113,67 @@ function recordLossStreakHit(userId) {
     }
 }
 
+function getModeFromHistory(state) {
+    const history = Array.isArray(state.history) ? state.history : [];
+    const histStr = history.join(',');
+    const lossStreak = Number(state.lossStreak) || 0;
+
+    // pasted_content_2.txt history patterns.
+    const recoveryPattern = histStr.endsWith('W,W,L') ||
+                            histStr.endsWith('W,W,W,L') ||
+                            /(L,L,L,L+)/.test(histStr);
+    const normalPattern = histStr.endsWith('W,L') ||
+                          /(W,W,W,W+),L$/.test(histStr);
+
+    // Three consecutive losses switch the prediction engine to pasted logic.
+    // History still decides whether that pasted logic is NORMAL or RECOVERY.
+    if (lossStreak >= 3) state.pastedMode = true;
+    if (!state.pastedMode) return 'NORMAL';
+    if (recoveryPattern) return 'RECOVERY';
+    if (normalPattern) return 'NORMAL';
+
+    // Once pasted mode is active, preserve the analysed mode until a win.
+    return state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
+}
+
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initUser(userId);
+    initState(userId);
+    const state = userStates[userId];
+
+    if (!Array.isArray(state.history)) state.history = [];
+    if (!Number.isInteger(state.lossStreak)) state.lossStreak = 0;
+
+    state.history.push(wasWin ? 'W' : 'L');
+    if (wasWin) {
+        // Any win exits pasted mode. The next prediction returns to BS/SB/BB/SS.
+        state.lossStreak = 0;
+        state.pastedMode = false;
+        state.mode = 'NORMAL';
+    } else {
+        state.lossStreak++;
+        const previousMode = state.mode || 'NORMAL';
+        state.mode = getModeFromHistory(state);
+        console.log(`[PREDICTION-2] history=${state.history.join(',')} | lossStreak=${state.lossStreak} | mode=${previousMode}->${state.mode} | pasted=${state.pastedMode}`);
+    }
+
+    if (state.history.length > 20) state.history.shift();
+
+    // Existing AutoBet level/martingale bookkeeping remains unchanged.
     if (typeof autobetState !== 'undefined' && autobetState[userId]) {
         const st = autobetState[userId];
         const cfg = autobetCfg[userId] || {};
         if (betPlaced) {
             if (wasWin) {
                 st.lastWinLevel = st.level;
-                st.lastWinMode = cfg.mode || "SIZE";
+                st.lastWinMode = cfg.mode || 'SIZE';
                 st.level = 1;
                 st.sizeLevel = 1;
                 st.numberLevel = 1;
                 st.inMart = false;
                 st.consecutiveLoss = 0;
                 st.lossStreakHitRecorded = false;
-            }
-            else {
+            } else {
                 st.consecutiveLoss++;
                 const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
                 const currentLevel = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
@@ -2124,8 +2213,7 @@ function formatMartingale(cfg) {
 
 function getStatus(userId) {
     initState(userId);
-    const state = userStates[userId];
-    return state.mode;
+    return userStates[userId].mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
 }
 
 async function sendResultAmountLine(chatId, userId, label, amount) {
@@ -2294,7 +2382,9 @@ async function runPredict(userId, chatId) {
 "║    👑 EARN WITH ME AI    ║\n"+
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
-"║ Mode    : BIG/SMALL\n"+
+"║ Game    : BIG/SMALL\n"+
+"║ Mode    : "+String(signal.mode || signal.pat || "NORMAL")+"\n"+
+"║ Pattern : "+String(signal.pattern || "RECOVERY")+"\n"+
 "║ Size    : "+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
 "║ Source  : Live Jade site\n"+
