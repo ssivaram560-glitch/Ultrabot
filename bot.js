@@ -2210,6 +2210,50 @@ function getBigSmallPatternPrediction(list) {
     };
 }
 
+function analyzeSameOppositeHistory(historyList, fallbackPattern) {
+    const sizes = (Array.isArray(historyList) ? historyList : []).slice(0, 200).map(item => {
+        const n = getResultNumber(item);
+        return n === null ? null : getSizeFromNumber(n);
+    }).filter(Boolean);
+
+    // A historical pair is evaluated as: previous result -> current result.
+    // SAME predicts the previous side; OPPOSITE predicts the inverse side.
+    let sameWins = 0;
+    let oppositeWins = 0;
+    let samples = 0;
+    for (let i = 0; i < sizes.length - 1; i++) {
+        const previous = sizes[i + 1];
+        const actual = sizes[i];
+        if (!previous || !actual) continue;
+        samples++;
+        if (previous === actual) sameWins++;
+        if (previous !== actual) oppositeWins++;
+    }
+
+    const sameRate = samples ? sameWins / samples : 0.5;
+    const oppositeRate = samples ? oppositeWins / samples : 0.5;
+    let mode;
+    if (!samples || Math.abs(sameRate - oppositeRate) < 0.05) {
+        mode = fallbackPattern?.last2Rule === 'OPPOSITE' ? 'OPPOSITE' : 'SAME';
+    } else {
+        mode = sameRate > oppositeRate ? 'SAME' : 'OPPOSITE';
+    }
+
+    const selectedRate = mode === 'SAME' ? sameRate : oppositeRate;
+    // Empirical confidence only; never claim a mathematical 99% guarantee.
+    const confidence = Math.max(50, Math.min(95, Math.round(selectedRate * 100)));
+    return {
+        mode,
+        samples,
+        sameWins,
+        oppositeWins,
+        sameRate: Math.round(sameRate * 100),
+        oppositeRate: Math.round(oppositeRate * 100),
+        confidence,
+        reason: `OldHistory ${samples} samples | SAME ${sameWins}/${samples} (${Math.round(sameRate * 100)}%) | OPPOSITE ${oppositeWins}/${samples} (${Math.round(oppositeRate * 100)}%)`
+    };
+}
+
 function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || list.length < 2) return null;
     initState(userId);
@@ -2229,25 +2273,32 @@ function decidePrediction(list, currentLevel, userId) {
     const oldResult = Array.isArray(list._oldAnalysis)
         ? getBigSmallPatternPrediction(list._oldAnalysis)
         : null;
-    const agreed = Boolean(oldResult && oldResult.prediction === result.prediction);
-    const finalPrediction = agreed ? result.prediction : result.prediction;
-    const confidence = oldResult ? (agreed ? 95 : 70) : 60;
+    const historyAnalysis = analyzeSameOppositeHistory(list._oldAnalysis, result);
+    const latestSize = result.sizes[0];
+    const modePrediction = historyAnalysis.mode === 'SAME'
+        ? latestSize
+        : (latestSize === 'BIG' ? 'SMALL' : 'BIG');
+    const patternAgrees = modePrediction === result.prediction;
+    const finalPrediction = modePrediction;
+    const confidence = historyAnalysis.samples >= 20
+        ? historyAnalysis.confidence
+        : (patternAgrees ? Math.min(85, historyAnalysis.confidence) : 60);
 
     const state = userStates[userId];
-    state.mode = 'PATTERN-5/4';
+    state.mode = historyAnalysis.mode;
     state.pastedMode = false;
     state.lastPrediction = result.prediction;
     state.lastPattern = result.last4;
-    state.lastDecisionReason = result.reason;
+    state.lastDecisionReason = `${result.reason} | ${historyAnalysis.reason} | Selected=${historyAnalysis.mode}`;
 
     return {
         type: 'SIZE',
         val: finalPrediction,
         conf: confidence,
-        pat: 'PATTERN-5/4',
-        mode: 'PATTERN-5/4',
+        pat: historyAnalysis.mode,
+        mode: historyAnalysis.mode,
         pattern: `${result.last2}/${result.last4}`,
-        decisionReason: `${result.reason} | LuciferOld=${oldResult ? oldResult.prediction : 'UNAVAILABLE'} | Consensus=${agreed ? 'YES' : 'NO'}`,
+        decisionReason: `${result.reason} | ${historyAnalysis.reason} | Mode=${historyAnalysis.mode} | PatternAgrees=${patternAgrees ? 'YES' : 'NO'}`,
         bets: [{ type: 'SIZE', val: finalPrediction, kind: 'size' }]
     };
 }
