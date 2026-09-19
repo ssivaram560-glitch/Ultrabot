@@ -639,7 +639,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 //  CONFIG
 // ============================================================
 // Keep secrets outside the source code.
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8670635800:";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8670635800:AAEeDoWmav3IL5Pj19shmaSfTHNuLjaT9Lw";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
@@ -650,8 +650,15 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://api.tashanrfv.com/api/webapi/Login";
 const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
-const API_URL     = "https://luciferapi.com/30sec.php";
-const DRAW_URL    = "https://luciferapi.com/30sec.php";
+const API_URL     = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+// Lucifer currently exposes the verified legacy history endpoint as 30sec.php;
+// no working 1min.php/1m.php endpoint was found, so it is used only as a
+// secondary historical cross-check, never as the primary 1M result source.
+const LUCIFER_OLD_ANALYSIS_URL = "https://luciferapi.com/30sec.php";
+const COMBINED_PAGE_URL = "https://spiffy-entremet-e5ac9c.netlify.app/";
+// The Netlify page itself fetches this live JSON endpoint for every refresh.
+const COMBINED_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
 const SITE_URL    = "https://www.ts777.co";
 const LOGIN_PAGE_URL = "https://www.ts777.co/login";
 const CHROME_ARGS = [
@@ -1001,6 +1008,111 @@ async function fetchList() {
         return null;
     }
 }
+
+// The user-provided Netlify page uses this JSON source directly.  Keep this
+// request bounded and return only a small normalized list to avoid retaining
+// large response objects in the Render free-plan process.
+async function fetchCombinedSourceList() {
+    try {
+        const response = await axios.get(COMBINED_SOURCE_URL + "?_=" + Date.now(), {
+            headers: {
+                "Accept": "application/json",
+                "Cache-Control": "no-cache, no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Origin": COMBINED_PAGE_URL.replace(/\/$/, ""),
+                "Referer": COMBINED_PAGE_URL,
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout: 8000,
+            maxContentLength: 512 * 1024,
+            maxBodyLength: 512 * 1024,
+            validateStatus: status => status >= 200 && status < 300
+        });
+        const raw = Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+        return raw.slice(0, 25).map(item => ({
+            issueNumber: String(item?.issueNumber ?? ''),
+            number: String(item?.number ?? '').replace(/\D/g, '').slice(-1),
+            color: String(item?.color ?? '')
+        })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
+    } catch (error) {
+        console.error('[COMBINED SOURCE ERROR]', error?.message || error);
+        return null;
+    }
+}
+
+function getCombinedStrategySize(n) {
+    const mapping = ['BIG', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG'];
+    return mapping[Number(n)] || null;
+}
+
+function getCombinedSourcePrediction(list, userId) {
+    const latest = Array.isArray(list) && list[0];
+    const n = Number.parseInt(String(latest?.number ?? ''), 10);
+    if (!latest || !Number.isInteger(n) || n < 0 || n > 9) {
+        return { skip: true, reason: 'Combined source returned no valid latest result' };
+    }
+
+    // Exact mapping observed in the supplied Netlify page:
+    // 9/5/1/0 -> BIG 4; 8/7/6/4/3/2 -> SMALL 5.
+    const mapping = ['BIG', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG'];
+    let size = mapping[n];
+    let number = size === 'BIG' ? 4 : 5;
+    const state = userStates[String(userId)] || {};
+    const mode = state.combinedFlipNext === true ? 'FLIP' : 'DIRECT';
+    if (mode === 'FLIP') {
+        size = size === 'BIG' ? 'SMALL' : 'BIG';
+        number = size === 'BIG' ? 4 : 5;
+    }
+
+    return {
+        type: 'COMBINED',
+        val: size,
+        number,
+        mode,
+        pat: mode,
+        pattern: `SOURCE-${n}`,
+        decisionReason: `Netlify source mapping for last result ${n}${mode === 'FLIP' ? ' + loss flip' : ''}`,
+        bets: [
+            { type: 'SIZE', val: size, kind: 'size' },
+            { type: 'NUMBER', val: number, kind: 'number' }
+        ]
+    };
+}
+
+async function fetchLuciferOldHistoryForAnalysis() {
+    try {
+        const response = await axios.get(LUCIFER_OLD_ANALYSIS_URL + "?_=" + Date.now(), {
+            headers: { "Accept": "application/json", "Cache-Control": "no-cache, no-store", "Pragma": "no-cache" },
+            timeout: 8000,
+            maxContentLength: 512 * 1024,
+            maxBodyLength: 512 * 1024,
+            validateStatus: status => status >= 200 && status < 300
+        });
+        const raw = Array.isArray(response.data?.data) ? response.data.data : [];
+        return raw.slice(0, 25).map((item, index) => ({
+            issueNumber: String(item?.issueNumber ?? index),
+            number: String(item?.number ?? '').replace(/\D/g, '').slice(-1)
+        })).filter(item => /^[0-9]$/.test(item.number));
+    } catch (error) {
+        console.error('[LUCIFER OLD HISTORY ERROR]', error?.message || error);
+        return [];
+    }
+}
+
+async function fetchListForUser(userId) {
+    const mode = String(autobetCfg[userId]?.mode || '').toUpperCase();
+    if (mode === 'COMBINED') return await fetchCombinedSourceList();
+
+    // Big/Small mode: primary prediction/result source is the official 1M feed.
+    // Lucifer history is fetched separately only for a bounded cross-check.
+    const [primary, oldHistory] = await Promise.all([
+        fetchList(),
+        fetchLuciferOldHistoryForAnalysis()
+    ]);
+    if (primary && Array.isArray(oldHistory)) primary._oldAnalysis = oldHistory;
+    return primary;
+}
+
 // Helper parser function
 async function parseBalanceResponse(r) {
     if (r.data && r.data.code === 0 && r.data.data && typeof r.data.data.balance !== 'undefined') {
@@ -1478,7 +1590,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    "WinGo_30S", 
+                gameCode:    "WinGo_1M", 
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -1644,7 +1756,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -2049,56 +2161,94 @@ function calculatePastedRecoveryPrediction(list, currentResult) {
     };
 }
 
-function decidePrediction(list, currentLevel, userId) {
+function getBigSmallPatternPrediction(list) {
     if (!Array.isArray(list) || list.length < 2) return null;
 
-    initState(userId);
-    const state = userStates[userId];
-    if (!Array.isArray(state.history)) state.history = [];
-    if (!Number.isInteger(state.lossStreak)) state.lossStreak = 0;
+    // API order is newest first. Use only the latest five periods.
+    const sizes = list.slice(0, 5).map(item => {
+        const n = getResultNumber(item);
+        return n === null ? null : getSizeFromNumber(n);
+    });
+    if (sizes.length < 2 || sizes.some(size => !size)) return null;
 
-    const pair = getLatestTwoPattern(list);
-    if (!pair) return { skip: true, reason: 'Latest 2 results are unavailable' };
+    const latest = sizes[0];
+    const second = sizes[1];
+    const last2Same = latest === second;
+    const last2Rule = last2Same ? 'OPPOSITE' : 'SAME';
 
-    const recoveryRequired = state.pastedMode === true;
-    let prediction;
-    let predictionMode;
-    let decisionReason;
+    // First rule: latest two same => opposite; latest two different => same/latest.
+    let prediction = last2Same
+        ? (latest === 'BIG' ? 'SMALL' : 'BIG')
+        : latest;
 
-    if (recoveryRequired) {
-        const recovery = calculatePastedRecoveryPrediction(list, pair.latestNumber);
-        if (!recovery) return { skip: true, reason: 'Recovery calculation unavailable' };
-        prediction = recovery.prediction;
-        // pasted_content_2 explicitly reverses the calculated result in RECOVERY mode.
-        if (state.mode === 'RECOVERY') {
-            prediction = prediction === 'SMALL' ? 'BIG' : 'SMALL';
-        }
-        predictionMode = 'RECOVERY';
-        decisionReason = `3+ consecutive losses; pasted logic ${recovery.reason}` +
-            (state.mode === 'RECOVERY' ? ' + recovery opposite' : '');
+    const last4 = sizes.slice(0, Math.min(4, sizes.length));
+    const big4 = last4.filter(size => size === 'BIG').length;
+    const small4 = last4.length - big4;
+    const all4Same = big4 === 4 || small4 === 4;
+
+    // Second rule: verify the latest four. A same run is changed to its
+    // opposite; a mixed four uses the clear majority.
+    let last4Rule;
+    if (all4Same) {
+        prediction = last4[0] === 'BIG' ? 'SMALL' : 'BIG';
+        last4Rule = 'ALL_4_SAME_OPPOSITE';
+    } else if (big4 >= 3 || small4 >= 3) {
+        prediction = big4 >= 3 ? 'BIG' : 'SMALL';
+        last4Rule = '4_PERIOD_MAJORITY';
     } else {
-        // BS/SB => opposite of the latest result; BB/SS => same as the latest result.
-        prediction = pair.prediction;
-        predictionMode = 'NORMAL';
-        decisionReason = `${pair.pair}: ${pair.rule === 'SAME' ? 'same' : 'opposite'} as latest ${pair.latestSize}`;
+        last4Rule = '4_PERIOD_MIXED_KEEP_LAST2_RULE';
     }
 
-    state.mode = predictionMode;
-    state.lastPrediction = prediction;
-    state.lastPredictionNumber = pair.latestNumber;
-    state.lastSelectionMode = predictionMode;
-    state.lastPattern = pair.pair;
-    state.lastDecisionReason = decisionReason;
+    return {
+        prediction,
+        sizes,
+        last2: `${second === 'BIG' ? 'B' : 'S'}${latest === 'BIG' ? 'B' : 'S'}`,
+        last2Rule,
+        last4: last4.map(size => size === 'BIG' ? 'B' : 'S').join(''),
+        last4Rule,
+        reason: `Last5=${sizes.map(size => size === 'BIG' ? 'B' : 'S').join('')} | Last2=${last2Rule} | Last4=${last4Rule}`
+    };
+}
+
+function decidePrediction(list, currentLevel, userId) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    initState(userId);
+
+    const cfgMode = String(autobetCfg[userId]?.mode || 'SIZE').toUpperCase();
+    // Big/Small mode uses only the new last-5/last-4 pattern engine.
+    // Combined mode keeps its separate live Netlify-source engine below.
+    if (cfgMode === 'COMBINED') {
+        return { skip: true, reason: 'Combined mode uses its live source predictor' };
+    }
+
+    const result = getBigSmallPatternPrediction(list);
+    if (!result) return { skip: true, reason: 'Not enough valid results for last-5 pattern' };
+
+    // Cross-check the same last-5/last-4 rules against Lucifer's older history.
+    // Agreement is a stronger signal, never a mathematical guarantee.
+    const oldResult = Array.isArray(list._oldAnalysis)
+        ? getBigSmallPatternPrediction(list._oldAnalysis)
+        : null;
+    const agreed = Boolean(oldResult && oldResult.prediction === result.prediction);
+    const finalPrediction = agreed ? result.prediction : result.prediction;
+    const confidence = oldResult ? (agreed ? 95 : 70) : 60;
+
+    const state = userStates[userId];
+    state.mode = 'PATTERN-5/4';
+    state.pastedMode = false;
+    state.lastPrediction = result.prediction;
+    state.lastPattern = result.last4;
+    state.lastDecisionReason = result.reason;
 
     return {
         type: 'SIZE',
-        val: prediction,
-        conf: recoveryRequired ? 90 : 85,
-        pat: predictionMode,
-        mode: predictionMode,
-        pattern: pair.pair,
-        decisionReason,
-        bets: [{ type: 'SIZE', val: prediction, kind: 'size' }]
+        val: finalPrediction,
+        conf: confidence,
+        pat: 'PATTERN-5/4',
+        mode: 'PATTERN-5/4',
+        pattern: `${result.last2}/${result.last4}`,
+        decisionReason: `${result.reason} | LuciferOld=${oldResult ? oldResult.prediction : 'UNAVAILABLE'} | Consensus=${agreed ? 'YES' : 'NO'}`,
+        bets: [{ type: 'SIZE', val: finalPrediction, kind: 'size' }]
     };
 }
 
@@ -2116,23 +2266,22 @@ function recordLossStreakHit(userId) {
 function getModeFromHistory(state) {
     const history = Array.isArray(state.history) ? state.history : [];
     const histStr = history.join(',');
-    const lossStreak = Number(state.lossStreak) || 0;
 
-    // pasted_content_2.txt history patterns.
+    // These are the pasted_content_2.txt history rules.
     const recoveryPattern = histStr.endsWith('W,W,L') ||
                             histStr.endsWith('W,W,W,L') ||
                             /(L,L,L,L+)/.test(histStr);
     const normalPattern = histStr.endsWith('W,L') ||
                           /(W,W,W,W+),L$/.test(histStr);
 
-    // Three consecutive losses switch the prediction engine to pasted logic.
-    // History still decides whether that pasted logic is NORMAL or RECOVERY.
-    if (lossStreak >= 3) state.pastedMode = true;
+    // Before the first 3-loss trigger, mode is irrelevant because the bot uses
+    // the BB/SS/BS/SB same/opposite engine.
     if (!state.pastedMode) return 'NORMAL';
     if (recoveryPattern) return 'RECOVERY';
     if (normalPattern) return 'NORMAL';
 
-    // Once pasted mode is active, preserve the analysed mode until a win.
+    // A W at the end closes the previous loss sequence: W,L,L,W is NORMAL.
+    if (history[history.length - 1] === 'W') return 'NORMAL';
     return state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
 }
 
@@ -2145,19 +2294,20 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     if (!Number.isInteger(state.lossStreak)) state.lossStreak = 0;
 
     state.history.push(wasWin ? 'W' : 'L');
-    if (wasWin) {
-        // Any win exits pasted mode. The next prediction returns to BS/SB/BB/SS.
-        state.lossStreak = 0;
-        state.pastedMode = false;
-        state.mode = 'NORMAL';
-    } else {
-        state.lossStreak++;
-        const previousMode = state.mode || 'NORMAL';
-        state.mode = getModeFromHistory(state);
-        console.log(`[PREDICTION-2] history=${state.history.join(',')} | lossStreak=${state.lossStreak} | mode=${previousMode}->${state.mode} | pasted=${state.pastedMode}`);
+    if (wasWin) state.lossStreak = 0;
+    else state.lossStreak++;
+
+    // Three losses only activate the pasted calculation engine. They do not
+    // directly decide NORMAL/RECOVERY; old W/L history decides that mode.
+    if (!state.pastedMode && state.lossStreak >= 3) {
+        state.pastedMode = true;
+        console.log('[PREDICTION-2] 3-loss trigger: pasted calculation engine ON');
     }
 
+    const previousMode = state.mode || 'NORMAL';
+    state.mode = getModeFromHistory(state);
     if (state.history.length > 20) state.history.shift();
+    console.log(`[PREDICTION-2] history=${state.history.join(',')} | mode=${previousMode}->${state.mode} | pasted=${state.pastedMode}`);
 
     // Existing AutoBet level/martingale bookkeeping remains unchanged.
     if (typeof autobetState !== 'undefined' && autobetState[userId]) {
@@ -2323,7 +2473,7 @@ async function runPredict(userId, chatId) {
         }
     }
 
-    const list = await fetchList();
+    const list = await fetchListForUser(userId);
     if (!Array.isArray(list) || list.length === 0) {
         console.warn("[PREDICTION] Draw history unavailable; retrying without emitting a false prediction");
         scheduleRun(userId, chatId, 15000);
@@ -2353,7 +2503,9 @@ async function runPredict(userId, chatId) {
     }
 
     initState(userId);
-    const signal = await decidePrediction(list, next, userId);
+    const signal = cfg.mode === "COMBINED"
+        ? getCombinedSourcePrediction(list, userId)
+        : await decidePrediction(list, next, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
     if (signal.skip === true) {
         console.log(`[PREDICTION] Skipping period ${next}: ${signal.reason || "skip result"}`);
@@ -2383,8 +2535,8 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : BIG/SMALL\n"+
-"║ Mode    : "+String(signal.mode || signal.pat || "NORMAL")+"\n"+
-"║ Pattern : "+String(signal.pattern || "RECOVERY")+"\n"+
+"║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
+"║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Size    : "+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
 "║ Source  : Live Jade site\n"+
@@ -2479,7 +2631,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             scheduleRun(userId, chatId, 15000);
             return;
         }
-        const list = await fetchList();
+        const list = await fetchListForUser(userId);
         if (!list) {
             releaseResultCheck();
             scheduleRun(userId, chatId, 10000);
@@ -2533,6 +2685,44 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         const win = settlement ? settlement.won : evaluationBets.some(b => b.type === "NUMBER"
             ? Number(b.val) === num
             : b.type === "SIZE" && b.val === actualSize);
+        // Exact flip rules from the new Netlify page. Apply only after LOSS.
+        if (cfg.mode === "COMBINED") {
+            const sourceState = userStates[String(userId)] || (userStates[String(userId)] = {});
+            sourceState.combinedFlipNext = false;
+            if (!win && Array.isArray(list)) {
+                const currentIndex = list.findIndex(item => String(item?.issueNumber) === String(target));
+                const current = list[currentIndex >= 0 ? currentIndex : 0];
+                const previous = list[currentIndex >= 0 ? currentIndex + 1 : 1];
+                const beforePrevious = list[currentIndex >= 0 ? currentIndex + 2 : 2];
+                const currentNumber = getResultNumber(current);
+                const previousNumber = getResultNumber(previous);
+                const beforePreviousNumber = getResultNumber(beforePrevious);
+
+                const color = n => Number(n) % 2 === 0 ? 'RED' : 'GREEN';
+                const samePair = (a, b) => a !== null && b !== null &&
+                    color(a) === color(b) && getCombinedStrategySize(a) === getCombinedStrategySize(b);
+
+                if (currentNumber !== null && previousNumber !== null && beforePreviousNumber !== null) {
+                    const sameColor3 = color(currentNumber) === color(previousNumber) &&
+                        color(previousNumber) === color(beforePreviousNumber);
+                    const sameStrategySize3 = getCombinedStrategySize(currentNumber) ===
+                        getCombinedStrategySize(previousNumber) &&
+                        getCombinedStrategySize(previousNumber) === getCombinedStrategySize(beforePreviousNumber);
+                    const mixedSize3 = !sameStrategySize3;
+
+                    if (sameColor3 && sameStrategySize3) {
+                        sourceState.combinedFlipNext = true;
+                    } else if (sameColor3 && mixedSize3) {
+                        sourceState.combinedFlipNext = false;
+                    } else {
+                        sourceState.combinedFlipNext = samePair(currentNumber, previousNumber);
+                    }
+                } else if (currentNumber !== null && previousNumber !== null) {
+                    sourceState.combinedFlipNext = samePair(currentNumber, previousNumber);
+                }
+            }
+        }
+
         const betLevel = st.level;
         const sizeBetLevel = st.sizeLevel;
         const numberBetLevel = st.numberLevel;
