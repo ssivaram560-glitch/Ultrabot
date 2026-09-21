@@ -1749,7 +1749,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -1866,7 +1866,7 @@ function calculateSettlement(bets, actualSize, actualNumber) {
 
     for (const bet of normalized) {
         const amount = Math.max(0, Number(bet.amt) || 0);
-        const actualColor = actualNumber <= 4 ? "GREEN" : "RED";
+        const actualColor = getActualColorBase(actualNumber);
         const won = bet.type === "SIZE"
             ? String(bet.val).toUpperCase() === String(actualSize).toUpperCase()
             : bet.type === "COLOR"
@@ -1931,6 +1931,7 @@ function formatPrediction(signal) {
     if (!signal || signal.skip === true) return "SKIP";
     if (signal.type === "NUMBER") return String(Number(signal.val));
     if (signal.type === "SIZE") return String(signal.val || "").toUpperCase();
+    if (signal.type === "COLOR") return String(signal.val || "").toUpperCase();
     if (signal.type === "COMBINED") {
         const size = String(signal.val || "").toUpperCase();
         const number = signal.number ?? signal.bets?.find(b => b.type === "NUMBER")?.val;
@@ -2343,6 +2344,7 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     // returns to SIZE. A win keeps the current mode.
     if (!wasWin) state.mode = previousMode === 'NORMAL' ? 'RECOVERY' : 'NORMAL';
     else state.mode = previousMode;
+    state.nextPredictionMode = state.mode === 'RECOVERY' ? 'COLOUR' : 'SIZE';
     state.pastedMode = false;
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[MODE] ${previousMode} -> ${state.mode} after ${wasWin ? 'WIN' : 'LOSS'} | next=${state.mode === 'NORMAL' ? 'SIZE' : 'COLOUR'}`);
@@ -2460,6 +2462,20 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
 // ============================================================
 // PREDICT LOOP
 // ============================================================
+function getActualColorBase(number) {
+    const n = Number(number);
+    if (n === 0) return 'RED';
+    if (n === 5) return 'GREEN';
+    return n <= 4 ? 'GREEN' : 'RED';
+}
+
+function getActualColorLabel(number) {
+    const n = Number(number);
+    if (n === 0) return 'RED+VIOLET';
+    if (n === 5) return 'GREEN+VIOLET';
+    return n <= 4 ? 'GREEN' : 'RED';
+}
+
 function parseItem(item) {
     const n = +(item.number || item.winNumber || 0);
     return {
@@ -2691,7 +2707,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         settledPeriods.set(timerKey, settled);
 
         const actualSize = num >= 5 ? "BIG" : "SMALL";
-        const actualColor = num <= 4 ? "GREEN" : "RED";
+        const actualColor = getActualColorBase(num);
+        const actualColorLabel = getActualColorLabel(num);
 
         const bets = Array.isArray(placedBets) ? placedBets : [];
         const betPlaced = bets.length > 0;
@@ -2755,8 +2772,9 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                 "╠══════════════════════════╣\n" +
                 `║ Number : ${num}\n` +
                 `║ Result : ${actualSize}\n` +
-                `║ Colour : ${actualColor}\n` +
+                `║ Colour : ${actualColorLabel}\n` +
                 `║ Status : ${win ? 'Correct Prediction' : 'Incorrect Prediction'}\n` +
+                `║ Next   : ${userStates[userId]?.nextPredictionMode || (win ? userStates[userId]?.mode : 'RECOVERY')}\n` +
                 "╚══════════════════════════╝"
             );
         }
