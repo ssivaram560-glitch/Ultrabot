@@ -2289,7 +2289,7 @@ function calculatePastedModePrediction(list, state) {
     if (!Number.isInteger(lastDigit)) return null;
 
     if (state.mode === 'RECOVERY') {
-        const color = lastDigit <= 4 ? 'GREEN' : 'RED';
+        const color = getActualColorBase(lastDigit);
         return {
             type: 'COLOR', val: color, conf: 90, pat: 'COLOUR', mode: 'COLOUR',
             pattern: `CALC-${lastDigit}`, lastDigit,
@@ -2466,14 +2466,14 @@ function getActualColorBase(number) {
     const n = Number(number);
     if (n === 0) return 'RED';
     if (n === 5) return 'GREEN';
-    return n <= 4 ? 'GREEN' : 'RED';
+    return n % 2 === 0 ? 'RED' : 'GREEN';
 }
 
 function getActualColorLabel(number) {
     const n = Number(number);
     if (n === 0) return 'RED+VIOLET';
     if (n === 5) return 'GREEN+VIOLET';
-    return n <= 4 ? 'GREEN' : 'RED';
+    return n % 2 === 0 ? 'RED' : 'GREEN';
 }
 
 function parseItem(item) {
@@ -3631,4 +3631,4 @@ const shutdown = async (signal) => {
 };
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
-startBot();
+startBot();d
