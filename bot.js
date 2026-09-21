@@ -2301,30 +2301,70 @@ function calculateHistoryDigit(item) {
 }
 
 function analyzeCalculationDigitHistory(historyList) {
-    const table = Array.from({ length: 10 }, () => ({ total: 0, size: { BIG: 0, SMALL: 0 }, color: { RED: 0, GREEN: 0 } }));
+    const table = Array.from({ length: 10 }, () => ({
+        total: 0,
+        size: { BIG: 0, SMALL: 0 },
+        color: { RED: 0, GREEN: 0 },
+        observations: []
+    }));
     const list = Array.isArray(historyList) ? historyList : [];
-    // list is newest first. For each older record, list[i-1] is its next actual period.
+    // Newest first: calculate each old record and compare it with the next
+    // actual period. This builds a digit-conditioned outcome pattern table.
     for (let i = 1; i < list.length; i++) {
         const digit = calculateHistoryDigit(list[i]);
         const nextNumber = getResultNumber(list[i - 1]);
         if (digit === null || nextNumber === null) continue;
         const row = table[digit];
+        const size = nextNumber >= 5 ? 'BIG' : 'SMALL';
+        const color = nextNumber % 2 === 0 ? 'RED' : 'GREEN';
         row.total++;
-        row.size[nextNumber >= 5 ? 'BIG' : 'SMALL']++;
-        row.color[nextNumber % 2 === 0 ? 'RED' : 'GREEN']++;
+        row.size[size]++;
+        row.color[color]++;
+        row.observations.unshift({ size, color, number: nextNumber });
+        if (row.observations.length > 200) row.observations.pop();
     }
     return table;
 }
 
-function chooseHistoricalPrediction(digit, mode, table) {
+function weightedOutcomeRate(row, domain, value) {
+    const observations = Array.isArray(row?.observations) ? row.observations : [];
+    if (!observations.length) return 0;
+    const recent = observations.slice(0, 20);
+    const allWins = observations.filter(o => o[domain] === value).length;
+    const recentWins = recent.filter(o => o[domain] === value).length;
+    const allRate = allWins / observations.length;
+    const recentRate = recentWins / recent.length;
+    return 0.60 * recentRate + 0.40 * allRate;
+}
+
+function chooseHistoricalPrediction(digit, table) {
     const row = table?.[digit];
     if (!row || row.total < 3) return null;
-    if (mode === 'RECOVERY') {
-        const color = row.color.RED >= row.color.GREEN ? 'RED' : 'GREEN';
-        return { value: color, wins: row.color[color], total: row.total, rate: Math.round(row.color[color] / row.total * 100) };
-    }
-    const size = row.size.BIG >= row.size.SMALL ? 'BIG' : 'SMALL';
-    return { value: size, wins: row.size[size], total: row.total, rate: Math.round(row.size[size] / row.total * 100) };
+    // Compare all four outcomes together. The highest historical score wins,
+    // regardless of whether it is a SIZE or COLOUR outcome.
+    const candidates = ['SMALL', 'BIG', 'RED', 'GREEN'].map(value => {
+        const domain = (value === 'SMALL' || value === 'BIG') ? 'size' : 'color';
+        return {
+            value,
+            type: domain === 'size' ? 'SIZE' : 'COLOR',
+            score: weightedOutcomeRate(row, domain, value),
+            wins: row[domain][value],
+            total: row.total
+        };
+    }).sort((a, b) => b.score - a.score);
+    const selected = candidates[0];
+    const second = candidates[1];
+    return {
+        value: selected.value,
+        type: selected.type,
+        wins: selected.wins,
+        total: selected.total,
+        rate: Math.round(selected.score * 100),
+        score: selected.score,
+        margin: Math.round((selected.score - second.score) * 100),
+        pattern: `SIZE SMALL:${row.size.SMALL} BIG:${row.size.BIG} | COLOR RED:${row.color.RED} GREEN:${row.color.GREEN}`,
+        ranking: candidates.map(c => `${c.value}:${Math.round(c.score * 100)}%`).join(' > ')
+    };
 }
 
 function calculatePastedModePrediction(list, state) {
@@ -2334,21 +2374,21 @@ function calculatePastedModePrediction(list, state) {
     if (!/^\d+$/.test(currentPeriod) || currentResult === null || currentResult === 0) return null;
     const digit = calculateHistoryDigit(list[0]);
     if (digit === null) return null;
-    const mode = state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
-    const historical = chooseHistoricalPrediction(digit, mode, state.calculationHistoryTable);
+    const historical = chooseHistoricalPrediction(digit, state.calculationHistoryTable);
     if (!historical) return null;
     const nextPeriodNum = BigInt(currentPeriod) + 1n;
     const nextLast3 = Number.parseInt(nextPeriodNum.toString().slice(-3), 10);
+    const label = historical.type === 'COLOR' ? 'COLOUR' : 'SIZE';
     return {
-        type: mode === 'RECOVERY' ? 'COLOR' : 'SIZE',
+        type: historical.type,
         val: historical.value,
         conf: historical.rate,
-        pat: mode === 'RECOVERY' ? 'COLOUR' : 'SIZE',
-        mode: mode === 'RECOVERY' ? 'COLOUR' : 'SIZE',
+        pat: label,
+        mode: label,
         pattern: `CALC-${digit}`,
         lastDigit: digit,
-        decisionReason: `${nextLast3} × exp(${currentResult}) -> ${digit} | Old calc matches ${historical.wins}/${historical.total} (${historical.rate}%) | ${mode === 'RECOVERY' ? 'COLOR' : 'SIZE'}=${historical.value}`,
-        bets: [{ type: mode === 'RECOVERY' ? 'COLOR' : 'SIZE', val: historical.value, kind: mode === 'RECOVERY' ? 'color' : 'size' }]
+        decisionReason: `${nextLast3} × exp(${currentResult}) -> ${digit} | ${historical.pattern} | Ranking ${historical.ranking} | Selected ${historical.value} ${historical.wins}/${historical.total} (${historical.rate}%) | Margin ${historical.margin}%`,
+        bets: [{ type: historical.type, val: historical.value, kind: historical.type === 'COLOR' ? 'color' : 'size' }]
     };
 }
 
@@ -2386,18 +2426,15 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     state.history.push(wasWin ? 'W' : 'L');
     if (state.history.length > 20) state.history.shift();
 
-    const previousMode = state.mode || 'NORMAL';
-    // NORMAL = SIZE. A loss moves to RECOVERY = COLOUR. A recovery loss
-    // returns to SIZE. A win keeps the current mode.
-    if (!wasWin) state.mode = previousMode === 'NORMAL' ? 'RECOVERY' : 'NORMAL';
-    else state.mode = previousMode;
+    // Every settled result toggles the state mode, regardless of WIN or LOSS.
+    // The calculation-digit historical ranking still chooses the next value.
+    const previousMode = state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
+    state.mode = previousMode === 'NORMAL' ? 'RECOVERY' : 'NORMAL';
     state.nextPredictionMode = state.mode === 'RECOVERY' ? 'COLOUR' : 'SIZE';
     state.pastedMode = false;
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
-    console.log(`[MODE] ${previousMode} -> ${state.mode} after ${wasWin ? 'WIN' : 'LOSS'} | next=${state.mode === 'NORMAL' ? 'SIZE' : 'COLOUR'}`);
+    console.log(`[MODE] ${previousMode}->${state.mode} after ${wasWin ? 'WIN' : 'LOSS'} | next=${state.nextPredictionMode} | history=${state.history.join(',')}`);
 
-    // A win resets the martingale level for both SIZE and COLOUR, including
-    // WATCH settlements where no live stake was placed.
     const st = autobetState[userId];
     if (wasWin && st) {
         st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
