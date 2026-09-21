@@ -2464,16 +2464,17 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
 // ============================================================
 function getActualColorBase(number) {
     const n = Number(number);
-    if (n === 0) return 'RED';
-    if (n === 5) return 'GREEN';
-    return n <= 4 ? 'GREEN' : 'RED';
+    // WinGo color mapping from the supplied game screenshot:
+    // even numbers = RED, odd numbers = GREEN.
+    if (!Number.isInteger(n) || n < 0 || n > 9) return null;
+    return n % 2 === 0 ? 'RED' : 'GREEN';
 }
 
 function getActualColorLabel(number) {
     const n = Number(number);
     if (n === 0) return 'RED+VIOLET';
     if (n === 5) return 'GREEN+VIOLET';
-    return n <= 4 ? 'GREEN' : 'RED';
+    return n % 2 === 0 ? 'RED' : 'GREEN';
 }
 
 function parseItem(item) {
