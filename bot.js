@@ -2154,7 +2154,7 @@ function calculatePastedRecoveryPrediction(list, currentResult) {
     if (!Number.isInteger(lastDigit)) return null;
 
     return {
-        prediction: lastDigit <= 4 ? 'SMALL' : 'BIG',
+        prediction: lastDigit >= 5 ? 'BIG' : 'SMALL',
         lastDigit,
         nextLast3Num,
         reason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit}`
@@ -2298,7 +2298,7 @@ function calculatePastedModePrediction(list, state) {
         };
     }
 
-    const size = lastDigit <= 4 ? 'SMALL' : 'BIG';
+    const size = lastDigit >= 5 ? 'BIG' : 'SMALL';
     return {
         type: 'SIZE', val: size, conf: 90, pat: 'SIZE', mode: 'SIZE',
         pattern: `CALC-${lastDigit}`, lastDigit,
@@ -2464,16 +2464,12 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
 // ============================================================
 function getActualColorBase(number) {
     const n = Number(number);
-    if (n === 0) return 'RED';
-    if (n === 5) return 'GREEN';
-    return n % 2 === 0 ? 'RED' : 'GREEN';
+    return n <= 4 ? 'GREEN' : 'RED';
 }
 
 function getActualColorLabel(number) {
     const n = Number(number);
-    if (n === 0) return 'RED+VIOLET';
-    if (n === 5) return 'GREEN+VIOLET';
-    return n % 2 === 0 ? 'RED' : 'GREEN';
+    return n <= 4 ? 'GREEN' : 'RED';
 }
 
 function parseItem(item) {
@@ -2481,10 +2477,7 @@ function parseItem(item) {
     return {
         n,
         size: n >= 5 ? "BIG" : "SMALL",
-        color:
-            n === 0 ? "RED" :
-            n === 5 ? "GREEN" :
-            n % 2 === 0 ? "RED" : "GREEN"
+        color: n <= 4 ? "GREEN" : "RED"
     };
 }
 
@@ -2543,9 +2536,43 @@ async function runPredict(userId, chatId) {
     const signal = cfg.mode === "COMBINED"
         ? getCombinedSourcePrediction(list, userId)
         : await decidePrediction(list, next, userId);
-    if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
+    if(!signal) {
+        await send(chatId,
+            "⏭️ SKIP\n" +
+            "Period: " + next.slice(-6) + "\n" +
+            "Reason: Prediction signal unavailable"
+        );
+        scheduleRun(userId, chatId, 5000);
+        runInFlight.delete(runKey);
+        return;
+    }
     if (signal.skip === true) {
-        console.log(`[PREDICTION] Skipping period ${next}: ${signal.reason || "skip result"}`);
+        const reason = signal.reason || "Signal filter rejected this period";
+        console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
+        await send(chatId,
+            "⏭️ SKIP\n" +
+            "Period: " + next.slice(-6) + "\n" +
+            "Reason: " + reason
+        );
+        scheduleRun(userId, chatId, 8000);
+        runInFlight.delete(runKey);
+        return;
+    }
+
+    // Confidence is a filter, not a win guarantee. Do not force a bet when
+    // the predictor does not report a strong enough signal.
+    // Existing source-based signals do not expose a confidence field; keep
+    // them eligible, while still filtering any explicitly low-confidence signal.
+    const signalConfidence = Number(signal.conf ?? 90);
+    const minimumConfidence = 90;
+    if (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence) {
+        const reason = `Confidence ${Number.isFinite(signalConfidence) ? signalConfidence : 0}% < required ${minimumConfidence}%`;
+        console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
+        await send(chatId,
+            "⏭️ SKIP\n" +
+            "Period: " + next.slice(-6) + "\n" +
+            "Reason: " + reason
+        );
         scheduleRun(userId, chatId, 8000);
         runInFlight.delete(runKey);
         return;
@@ -2740,7 +2767,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                 const previousNumber = getResultNumber(previous);
                 const beforePreviousNumber = getResultNumber(beforePrevious);
 
-                const color = n => Number(n) % 2 === 0 ? 'RED' : 'GREEN';
+                const color = n => Number(n) <= 4 ? 'GREEN' : 'RED';
                 const samePair = (a, b) => a !== null && b !== null &&
                     color(a) === color(b) && getCombinedStrategySize(a) === getCombinedStrategySize(b);
 
@@ -3631,4 +3658,4 @@ const shutdown = async (signal) => {
 };
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
-startBot();
+startBot();d
