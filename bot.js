@@ -656,7 +656,7 @@ const DRAW_URL    = "https://luciferapi.com/30sec.php";
 // no working 1min.php/1m.php endpoint was found, so it is used only as a
 // secondary historical cross-check, never as the primary 1M result source.
 const LUCIFER_OLD_ANALYSIS_URL = "https://luciferapi.com/30sec.php";
-const COMBINED_PAGE_URL = "https://spiffy-entremet-e5ac9c.netlify.app/";
+const COMBINED_PAGE_URL = "https://endearing-bavarois-067272.netlify.app/";
 // The Netlify page itself fetches this live JSON endpoint for every refresh.
 const COMBINED_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
 const SITE_URL    = "https://www.ts777.co";
