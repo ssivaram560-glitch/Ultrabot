@@ -1115,6 +1115,50 @@ async function getCombinedSourcePrediction(list, userId) {
         return null;
     };
 
+    // Lightweight online ML candidate. It learns a multiclass score for each
+    // number from period/result/size/colour features, then is evaluated in
+    // chronological walk-forward order before being allowed to win selection.
+    const mlFeatures = row => {
+        const digits = String(row.issueNumber || '').replace(/\D/g, '');
+        return [
+            1,
+            (Number.parseInt(digits.slice(-3), 10) || 0) / 999,
+            (Number.parseInt(digits.slice(-1), 10) || 0) / 9,
+            row.number / 9,
+            row.size === 'BIG' ? 1 : -1,
+            row.color === 'RED' ? 1 : -1
+        ];
+    };
+    const dot = (weights, features) => weights.reduce((sum, value, i) => sum + value * features[i], 0);
+    const mlWeights = Object.fromEntries([0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => [n, [0, 0, 0, 0, 0, 0]]));
+    let mlTested = 0;
+    let mlHits = 0;
+    for (let index = fullHistory.length - 1; index >= 2; index--) {
+        const target = fullHistory[index];
+        const actual = fullHistory[index - 1]?.number;
+        const pool = poolForNumber(target.number);
+        if (!pool.includes(actual)) continue;
+        const features = mlFeatures(target);
+        const predicted = pool.slice().sort((a, b) => dot(mlWeights[b], features) - dot(mlWeights[a], features) || a - b)[0];
+        mlTested++;
+        if (predicted === actual) mlHits++;
+        if (predicted !== actual) {
+            for (let i = 0; i < features.length; i++) {
+                mlWeights[actual][i] += features[i];
+                mlWeights[predicted][i] -= features[i];
+            }
+        }
+    }
+    const currentFeatures = mlFeatures({
+        issueNumber: latest.issueNumber ?? latest.issue,
+        number: n,
+        size: currentSize,
+        color: currentColor
+    });
+    const mlNumber = oppositePool.slice().sort((a, b) =>
+        dot(mlWeights[b], currentFeatures) - dot(mlWeights[a], currentFeatures) || a - b
+    )[0];
+
     // Select the rule that performed best in a walk-forward test. This avoids
     // choosing a number merely because it appeared most often overall.
     const rules = ['EXACT-SIZE-COLOR', 'SIZE-ONLY', 'COLOR-ONLY', 'RECENT-POOL'];
@@ -1131,10 +1175,14 @@ async function getCombinedSourcePrediction(list, userId) {
             if (predicted === fullHistory[index - 1].number) hits++;
         }
         return { rule, tested, hits, rate: tested ? hits / tested : 0 };
-    }).sort((a, b) => b.rate - a.rate || b.tested - a.tested || a.rule.localeCompare(b.rule));
+    });
+    reports.push({ rule: 'ML-PERCEPTRON', tested: mlTested, hits: mlHits, rate: mlTested ? mlHits / mlTested : 0, mlNumber });
+    reports.sort((a, b) => b.rate - a.rate || b.tested - a.tested || a.rule.localeCompare(b.rule));
 
     const selectedRule = reports[0];
-    const selectedNumber = selectedRule?.rule === 'RECENT-POOL'
+    const selectedNumber = selectedRule?.rule === 'ML-PERCEPTRON'
+        ? selectedRule.mlNumber
+        : selectedRule?.rule === 'RECENT-POOL'
         ? findNearestPrediction(0, 'RECENT-POOL')
         : findNearestPrediction(0, selectedRule?.rule || 'EXACT-SIZE-COLOR');
     const number = selectedNumber ?? oppositePool[0];
@@ -1155,7 +1203,7 @@ async function getCombinedSourcePrediction(list, userId) {
             `selected ${number}`,
         bets: [
             { type: 'SIZE', val: size, kind: 'size' },
-            { type: 'NUMBER', val: selected.number, kind: 'number' }
+            { type: 'NUMBER', val: number, kind: 'number' }
         ]
     };
     getCombinedSourcePrediction._cache = { key: cacheKey, signal };
