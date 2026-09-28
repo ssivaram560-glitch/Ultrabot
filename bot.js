@@ -1048,8 +1048,8 @@ async function fetchLuciferFullHistory() {
         const response = await axios.get(LUCIFER_FULL_HISTORY_URL + '?_=' + Date.now(), {
             headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache, no-store', 'Pragma': 'no-cache', 'User-Agent': 'Mozilla/5.0' },
             timeout: 12000,
-            maxContentLength: 16 * 1024 * 1024,
-            maxBodyLength: 16 * 1024 * 1024,
+            maxContentLength: 128 * 1024 * 1024,
+            maxBodyLength: 128 * 1024 * 1024,
             validateStatus: status => status >= 200 && status < 300
         });
         const raw = Array.isArray(response.data?.data) ? response.data.data : [];
@@ -1185,6 +1185,96 @@ function getCombinedEnsembleSize(list) {
     };
 }
 
+/* ============================================================
+   ALL HISTORY ANALYSIS: SIZE + COLOUR + NUMBER
+   Uses every record returned in the API data array with conditional transition counts and walk-forward validation.
+   It reports empirical rates; it does not guarantee future results.
+============================================================ */
+function analysisColor(row) {
+    const raw = String(row?.color || '').split(',')[0].trim().toUpperCase();
+    if (raw === 'RED' || raw === 'GREEN' || raw === 'VIOLET') return raw;
+    const n = getResultNumber(row);
+    return Number.isInteger(n) && typeof getActualColorBase === 'function'
+        ? String(getActualColorBase(n)).toUpperCase()
+        : '';
+}
+
+function analyze24kHistory(fullHistory, latestNumber, currentSize, currentColor) {
+    const rows = (Array.isArray(fullHistory) ? fullHistory : []).map(row => ({
+        number: getResultNumber(row),
+        size: String(row?.size || '').toUpperCase() || (getResultNumber(row) >= 5 ? 'BIG' : 'SMALL'),
+        color: analysisColor(row),
+        issueNumber: String(row?.issueNumber || '')
+    })).filter(row => Number.isInteger(row.number) && (row.size === 'BIG' || row.size === 'SMALL'));
+    if (rows.length < 30) return null;
+
+    const contextSize = currentSize || getSizeFromNumber(latestNumber);
+    const contextColor = currentColor || analysisColor({ number: latestNumber });
+    const sizeCounts = { BIG: 1, SMALL: 1 };
+    const numberCounts = {};
+    for (let n = 0; n <= 9; n++) numberCounts[n] = 1;
+    let contextSamples = 0;
+    let colourSamples = 0;
+
+    // Newest-first: row[i - 1] is the historical next outcome for row[i].
+    for (let i = 2; i < rows.length; i++) {
+        const target = rows[i];
+        const next = rows[i - 1];
+        const exactContext = target.size === contextSize && (!contextColor || target.color === contextColor);
+        const sizeContext = target.size === contextSize;
+        const colorContext = contextColor && target.color === contextColor;
+        if (exactContext) {
+            sizeCounts[next.size]++;
+            if (next.number >= 0 && next.number <= 9) numberCounts[next.number]++;
+            contextSamples++;
+        } else if (sizeContext) {
+            sizeCounts[next.size] += 0.35;
+        }
+        if (colorContext) {
+            sizeCounts[next.size] += 0.20;
+            colourSamples++;
+        }
+    }
+
+    const sizeTotal = sizeCounts.BIG + sizeCounts.SMALL;
+    const predictedSize = sizeCounts.BIG >= sizeCounts.SMALL ? 'BIG' : 'SMALL';
+    const sizeConfidence = Math.round(Math.max(sizeCounts.BIG, sizeCounts.SMALL) / sizeTotal * 100);
+    const numberPool = predictedSize === 'BIG' ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
+    const predictedNumber = numberPool.slice().sort((a, b) => numberCounts[b] - numberCounts[a] || a - b)[0];
+    const poolTotal = numberPool.reduce((sum, n) => sum + numberCounts[n], 0);
+    const numberConfidence = Math.round((numberCounts[predictedNumber] / poolTotal) * 100);
+
+    // Walk-forward estimate for the same context rule, limited to recent 2,000 rows.
+    let tested = 0, hits = 0;
+    const limit = rows.length - 1;
+    for (let i = 2; i < limit; i++) {
+        const target = rows[i], actual = rows[i - 1];
+        if (target.size !== contextSize || (contextColor && target.color !== contextColor)) continue;
+        const pool = predictedSize === 'BIG' ? [5,6,7,8,9] : [0,1,2,3,4];
+        const candidate = pool.slice().sort((a,b) => {
+            const ca = rows.slice(i + 1, Math.min(rows.length, i + 201)).filter(r => r.number === a).length;
+            const cb = rows.slice(i + 1, Math.min(rows.length, i + 201)).filter(r => r.number === b).length;
+            return cb - ca || a - b;
+        })[0];
+        tested++;
+        if (candidate === actual.number) hits++;
+    }
+
+    return {
+        size: predictedSize,
+        number: predictedNumber,
+        sizeConfidence,
+        numberConfidence,
+        contextSamples,
+        colourSamples,
+        tested,
+        hits,
+        walkForwardRate: tested ? Math.round(hits / tested * 100) : 0,
+        context: `${contextSize}+${contextColor || 'ANY'}`,
+        sourceRows: rows.length
+    };
+}
+
 async function getCombinedSourcePrediction(list, userId) {
     const latest = Array.isArray(list) && list[0];
     const n = Number.parseInt(String(latest?.number ?? ''), 10);
@@ -1197,8 +1287,8 @@ async function getCombinedSourcePrediction(list, userId) {
     const mapping = ['BIG', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG'];
     const sourceSize = mapping[n];
     const ensemble = getCombinedEnsembleSize(list);
-    const size = ensemble?.side || sourceSize;
-    const oppositePool = size === 'BIG' ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
+    let size = ensemble?.side || sourceSize;
+    let oppositePool = size === 'BIG' ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
     const cacheKey = `${String(latest.issueNumber ?? latest.issue)}:${n}:${size}`;
     if (getCombinedSourcePrediction._cache?.key === cacheKey) {
         return getCombinedSourcePrediction._cache.signal;
@@ -1210,6 +1300,11 @@ async function getCombinedSourcePrediction(list, userId) {
 
     const currentSize = String(latest?.size || getSizeFromNumber(n)).toUpperCase();
     const currentColor = String(latest?.color || '').split(',')[0].toUpperCase();
+    const deepAnalysis = analyze24kHistory(fullHistory, n, currentSize, currentColor);
+    if (deepAnalysis?.size) {
+        size = deepAnalysis.size;
+        oppositePool = size === 'BIG' ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
+    }
     const netlifySizeForNumber = number => mapping[Number(number)];
     const poolForNumber = number => netlifySizeForNumber(number) === 'BIG'
         ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
@@ -1283,7 +1378,7 @@ async function getCombinedSourcePrediction(list, userId) {
     const reports = rules.map(rule => {
         let tested = 0;
         let hits = 0;
-        const limit = Math.min(fullHistory.length - 1, 401);
+        const limit = fullHistory.length - 1;
         for (let index = 1; index < limit; index++) {
             const predicted = rule === 'RECENT-POOL'
                 ? findNearestPrediction(index, 'RECENT-POOL')
@@ -1303,25 +1398,29 @@ async function getCombinedSourcePrediction(list, userId) {
         : selectedRule?.rule === 'RECENT-POOL'
         ? findNearestPrediction(0, 'RECENT-POOL')
         : findNearestPrediction(0, selectedRule?.rule || 'EXACT-SIZE-COLOR');
-    const number = selectedNumber ?? oppositePool[0];
+    const number = deepAnalysis?.number ?? selectedNumber ?? oppositePool[0];
     const confidence = selectedRule?.tested ? Math.round(selectedRule.rate * 100) : 0;
 
     const signal = {
         type: 'COMBINED',
         val: size,
         number,
-        mode: 'BIG/SMALL ENSEMBLE + LUCIFER NUMBER',
+        mode: 'ALL HISTORY SIZE+COLOUR+NUMBER ANALYSIS',
         pat: 'MARKOV+MOMENTUM+REVERSAL',
         pattern: `${ensemble ? ensemble.modelText : 'SOURCE-MAPPING-FALLBACK'} | SIZE-${size} | OPPOSITE-POOL`,
         sizeConfidence: ensemble?.confidence ?? 50,
         modelAgreement: ensemble?.agreement || 'fallback',
-        numberConfidence: confidence,
+        numberConfidence: deepAnalysis?.numberConfidence ?? confidence,
+        historicalRows: deepAnalysis?.sourceRows || fullHistory.length,
+        contextSamples: deepAnalysis?.contextSamples || 0,
+        walkForwardRate: deepAnalysis?.walkForwardRate || 0,
         decisionReason:
             `Size ${size} via ${ensemble ? 'ensemble' : 'source fallback'}; ` +
             `models ${ensemble?.agreement || 'n/a'}; pool ${oppositePool.join(',')} | ` +
             `Lucifer context ${currentSize || 'SIZE'}+${currentColor || 'COLOR'} | ` +
             `rule ${selectedRule?.rule || 'FALLBACK'} walk-forward ${selectedRule?.hits || 0}/${selectedRule?.tested || 0} | ` +
-            `selected ${number}`,
+            `selected ${number} | ALL rows ${deepAnalysis?.sourceRows || fullHistory.length} | ` +
+            `context ${deepAnalysis?.contextSamples || 0} | walk-forward ${deepAnalysis?.walkForwardRate || 0}%`,
         bets: [
             { type: 'SIZE', val: size, kind: 'size' },
             { type: 'NUMBER', val: number, kind: 'number' }
