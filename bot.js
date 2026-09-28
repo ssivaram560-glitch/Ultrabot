@@ -1070,6 +1070,121 @@ function getCombinedStrategySize(n) {
     return mapping[Number(n)] || null;
 }
 
+
+/* ============================================================
+   BIG/SMALL ENSEMBLE FOR BIGSMALL+NUMBER MODE
+   Markov + Momentum + Reversal over newest-first draw history.
+   The number leg continues to use the existing walk-forward selector.
+============================================================ */
+function combinedHistorySizes(list) {
+    return (Array.isArray(list) ? list : [])
+        .map(getResultNumber)
+        .filter(n => Number.isInteger(n))
+        .map(getSizeFromNumber);
+}
+
+function combinedMarkov(sizes) {
+    if (sizes.length < 12) return { side: sizes[0] || 'BIG', prob: 0.5, weight: 0 };
+    const current = sizes[0], previous = sizes[1];
+    let big1 = 1, small1 = 1, big2 = 1, small2 = 1;
+    for (let i = 1; i < sizes.length; i++) {
+        if (sizes[i] === current) sizes[i - 1] === 'BIG' ? big1++ : small1++;
+    }
+    for (let i = 2; i < sizes.length; i++) {
+        if (sizes[i] === current && sizes[i - 1] === previous) {
+            sizes[i - 2] === 'BIG' ? big2++ : small2++;
+        }
+    }
+    const p1 = big1 / (big1 + small1);
+    const p2 = big2 / (big2 + small2);
+    const secondOrderWeight = Math.min(0.5, (big2 + small2 - 2) / 12);
+    const combined = p1 * (1 - secondOrderWeight) + p2 * secondOrderWeight;
+    const edge = Math.abs(combined - 0.5) * 2;
+    return {
+        side: combined >= 0.5 ? 'BIG' : 'SMALL',
+        prob: Math.max(combined, 1 - combined),
+        weight: Math.min(1, edge * 1.35)
+    };
+}
+
+function combinedMomentum(sizes) {
+    if (sizes.length < 12) return { side: sizes[0] || 'BIG', prob: 0.5, weight: 0 };
+    const windows = [{ n: 6, decay: 0.78, weight: 0.30 }, { n: 16, decay: 0.90, weight: 0.70 }];
+    let big = 0, small = 0;
+    for (const window of windows) {
+        let b = 0, s = 0;
+        for (let i = 0; i < Math.min(window.n, sizes.length); i++) {
+            const value = Math.pow(window.decay, i);
+            sizes[i] === 'BIG' ? b += value : s += value;
+        }
+        const total = b + s || 1;
+        if (b >= s) big += ((b - s) / total) * window.weight;
+        else small += ((s - b) / total) * window.weight;
+    }
+    const total = big + small || 1;
+    const edge = Math.abs(big - small) / total;
+    return { side: big >= small ? 'BIG' : 'SMALL', prob: 0.5 + edge * 0.45, weight: Math.min(1, edge * 1.35) };
+}
+
+function combinedReversal(sizes) {
+    let streak = 1;
+    for (let i = 1; i < sizes.length; i++) {
+        if (sizes[i] === sizes[0]) streak++;
+        else break;
+    }
+    if (streak < 4) return { side: sizes[0] || 'BIG', prob: 0.5, weight: 0 };
+    const softLimit = sizes[0] === 'BIG' ? 4 : 6;
+    if (streak < softLimit) return { side: sizes[0], prob: 0.5, weight: 0.10 };
+    const weight = Math.min(0.90, 0.42 + (streak - softLimit + 1) * 0.12);
+    return { side: sizes[0] === 'BIG' ? 'SMALL' : 'BIG', prob: 0.5 + weight * 0.30, weight };
+}
+
+function getCombinedEnsembleSize(list) {
+    const sizes = combinedHistorySizes(list);
+    if (sizes.length < 12) return null;
+    const models = [
+        { name: 'Markov', out: combinedMarkov(sizes) },
+        { name: 'Momentum', out: combinedMomentum(sizes) },
+        { name: 'Reversal', out: combinedReversal(sizes) }
+    ];
+    let bigScore = 0, smallScore = 0, totalWeight = 0;
+    for (const model of models) {
+        const weight = Math.max(0, Math.min(1, model.out.weight || 0));
+        const probability = Math.max(0.5, Math.min(0.95, model.out.prob || 0.5));
+        if (model.out.side === 'BIG') {
+            bigScore += probability * weight;
+            smallScore += (1 - probability) * weight;
+        } else {
+            smallScore += probability * weight;
+            bigScore += (1 - probability) * weight;
+        }
+        totalWeight += weight;
+    }
+    const bigProbability = totalWeight ? bigScore / totalWeight : 0.5;
+    let side = bigProbability >= 0.5 ? 'BIG' : 'SMALL';
+    let margin = Math.abs(bigProbability - (1 - bigProbability));
+    const active = models.filter(model => model.out.weight > 0.12);
+    let agree = active.filter(model => model.out.side === side).length;
+    if (margin < 0.07) {
+        const strongest = models.reduce((best, model) => !best || model.out.weight > best.out.weight ? model : best, null);
+        if (strongest && strongest.out.weight > 0.20) {
+            side = strongest.out.side;
+            margin = Math.max(margin, 0.08);
+            agree = active.filter(model => model.out.side === side).length;
+        }
+    }
+    let confidence = 50 + margin * 74;
+    if (active.length === 3) confidence += agree === 3 ? 13 : agree === 2 ? 6 : 0;
+    else if (active.length === 2 && agree === 2) confidence += 6;
+    return {
+        side,
+        confidence: Math.max(52, Math.min(96, Math.round(confidence))),
+        modelText: models.map(model => `${model.name}:${model.out.side}`).join(' | '),
+        agreement: `${agree}/${active.length}`,
+        historySize: sizes.length
+    };
+}
+
 async function getCombinedSourcePrediction(list, userId) {
     const latest = Array.isArray(list) && list[0];
     const n = Number.parseInt(String(latest?.number ?? ''), 10);
@@ -1077,9 +1192,12 @@ async function getCombinedSourcePrediction(list, userId) {
         return { skip: true, reason: 'One-minute source returned no valid latest result' };
     }
 
-    // Exact SIZE mapping observed in the supplied Netlify page.
+    // Use the requested ensemble for the SIZE leg. If history is too short,
+    // retain the original supplied Netlify mapping as a deterministic fallback.
     const mapping = ['BIG', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG', 'SMALL', 'SMALL', 'SMALL', 'BIG'];
-    const size = mapping[n];
+    const sourceSize = mapping[n];
+    const ensemble = getCombinedEnsembleSize(list);
+    const size = ensemble?.side || sourceSize;
     const oppositePool = size === 'BIG' ? [0, 1, 2, 3, 4] : [5, 6, 7, 8, 9];
     const cacheKey = `${String(latest.issueNumber ?? latest.issue)}:${n}:${size}`;
     if (getCombinedSourcePrediction._cache?.key === cacheKey) {
@@ -1192,12 +1310,15 @@ async function getCombinedSourcePrediction(list, userId) {
         type: 'COMBINED',
         val: size,
         number,
-        mode: 'NETLIFY-SIZE+LUCIFER-NUMBER',
-        pat: 'SHARED-HISTORY',
-        pattern: `SOURCE-SIZE-${size}-OPPOSITE-POOL`,
+        mode: 'BIG/SMALL ENSEMBLE + LUCIFER NUMBER',
+        pat: 'MARKOV+MOMENTUM+REVERSAL',
+        pattern: `${ensemble ? ensemble.modelText : 'SOURCE-MAPPING-FALLBACK'} | SIZE-${size} | OPPOSITE-POOL`,
+        sizeConfidence: ensemble?.confidence ?? 50,
+        modelAgreement: ensemble?.agreement || 'fallback',
         numberConfidence: confidence,
         decisionReason:
-            `Netlify size for ${n}: ${size}; pool ${oppositePool.join(',')} | ` +
+            `Size ${size} via ${ensemble ? 'ensemble' : 'source fallback'}; ` +
+            `models ${ensemble?.agreement || 'n/a'}; pool ${oppositePool.join(',')} | ` +
             `Lucifer context ${currentSize || 'SIZE'}+${currentColor || 'COLOR'} | ` +
             `rule ${selectedRule?.rule || 'FALLBACK'} walk-forward ${selectedRule?.hits || 0}/${selectedRule?.tested || 0} | ` +
             `selected ${number}`,
@@ -2995,6 +3116,7 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : BIG/SMALL\n"+
+"║ 🎮 Mode  : BigSmall+Number\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
