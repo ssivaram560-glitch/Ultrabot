@@ -1778,7 +1778,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0 };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -2342,7 +2342,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [] };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0 };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -2867,6 +2867,268 @@ function analyzeSameOppositeHistory(historyList, fallbackPattern) {
     };
 }
 
+/* ============================================================
+   SIX-RESULT OPPOSITE PATTERN PREDICTOR
+   - Uses Lucifer root history (newest first).
+   - Exactly 6 latest results are analyzed.
+   - 4B/2S or 4S/2B: requires a visible double pattern (BB/SS).
+     The prediction is the opposite side of the strongest/recent double.
+   - 3B/3S: requires a strict zigzag (BSBSBS or SBSBSB).
+     The prediction is the opposite of the normal zigzag continuation.
+   - Any other shape is WAIT/SKIP.
+   - A signal is locked after dispatch and is kept after losses until WIN.
+   This is a heuristic only; it cannot guarantee a win.
+============================================================ */
+function sixPatternSide(value) {
+    const n = getResultNumber(value);
+    return n === null ? null : (n >= 5 ? 'B' : 'S');
+}
+
+function sixPatternColor(value) {
+    const n = getResultNumber(value);
+    if (n === null) return null;
+    if (n === 0 || n === 2 || n === 4 || n === 6 || n === 8) return 'R';
+    return 'G';
+}
+
+function oppositeSixSide(side) {
+    return side === 'B' ? 'SMALL' : 'BIG';
+}
+
+function analyzeSixResultOppositePattern(history) {
+    const rows = Array.isArray(history) ? history : [];
+    const latestSix = rows.slice(0, 6);
+    if (latestSix.length < 6) {
+        return { skip: true, reason: 'Need 6 valid Lucifer results', pattern: '' };
+    }
+
+    const sizes = latestSix.map(sixPatternSide);
+    const colors = latestSix.map(sixPatternColor);
+    if (sizes.some(v => !v) || colors.some(v => !v)) {
+        return { skip: true, reason: 'Latest 6 Lucifer results contain invalid values', pattern: '' };
+    }
+
+    const bigCount = sizes.filter(v => v === 'B').length;
+    const smallCount = sizes.filter(v => v === 'S').length;
+    const sizePattern = sizes.join('');
+    const colorPattern = colors.join('');
+    const colorRuns = colors.filter((v, i) => i === 0 || v !== colors[i - 1]).length;
+
+    // Only accept the requested 4/2 shape when a double is visibly present.
+    if ((bigCount === 4 && smallCount === 2) || (bigCount === 2 && smallCount === 4)) {
+        const doublePositions = [];
+        for (let i = 0; i < sizes.length - 1; i++) {
+            if (sizes[i] === sizes[i + 1]) {
+                doublePositions.push({ side: sizes[i], index: i });
+            }
+        }
+        if (!doublePositions.length) {
+            return {
+                skip: true,
+                reason: `4/2 count found (${bigCount}B ${smallCount}S), but no visible BB/SS double pattern`,
+                pattern: sizePattern,
+                colorPattern,
+                bigCount,
+                smallCount
+            };
+        }
+
+        // Prefer the most frequent double side; break ties by newest occurrence.
+        const doubleCounts = doublePositions.reduce((out, item) => {
+            out[item.side] = (out[item.side] || 0) + 1;
+            return out;
+        }, {});
+        const doubleSide = ['B', 'S'].sort((a, b) =>
+            (doubleCounts[b] || 0) - (doubleCounts[a] || 0) ||
+            doublePositions.find(x => x.side === a).index - doublePositions.find(x => x.side === b).index
+        )[0];
+
+        return {
+            skip: false,
+            type: 'SIZE',
+            val: oppositeSixSide(doubleSide),
+            pattern: sizePattern,
+            colorPattern,
+            rule: '4/2_DOUBLE_OPPOSITE',
+            bigCount,
+            smallCount,
+            doubleSide,
+            doublePattern: doubleSide + doubleSide,
+            conf: 50,
+            historyBased: true,
+            mode: 'SIX-RESULT OPPOSITE',
+            pat: 'DOUBLE-OPPOSITE',
+            decisionReason: `${sizePattern}: ${bigCount}B/${smallCount}S; ${doubleSide + doubleSide} double -> opposite ${oppositeSixSide(doubleSide)}`,
+            bets: [{ type: 'SIZE', val: oppositeSixSide(doubleSide), kind: 'size' }]
+        };
+    }
+
+    // Strict zigzag only; mixed 3/3 shapes are intentionally skipped.
+    const isZigzag = sizes.every((v, i) => i === 0 || v !== sizes[i - 1]);
+    if (bigCount === 3 && smallCount === 3 && isZigzag) {
+        const latestSide = sizes[0];
+        const normalContinuation = latestSide === 'B' ? 'S' : 'B';
+        const oppositePrediction = oppositeSixSide(normalContinuation);
+        return {
+            skip: false,
+            type: 'SIZE',
+            val: oppositePrediction,
+            pattern: sizePattern,
+            colorPattern,
+            rule: '3/3_ZIGZAG_OPPOSITE',
+            bigCount,
+            smallCount,
+            normalContinuation: oppositeSixSide(latestSide),
+            conf: 50,
+            historyBased: true,
+            mode: 'SIX-RESULT OPPOSITE',
+            pat: 'ZIGZAG-OPPOSITE',
+            decisionReason: `${sizePattern}: strict 3B/3S zigzag; normal ${oppositeSixSide(latestSide)} -> opposite ${oppositePrediction}`,
+            bets: [{ type: 'SIZE', val: oppositePrediction, kind: 'size' }]
+        };
+    }
+
+    return {
+        skip: true,
+        reason: `No requested pattern: ${sizePattern} (${bigCount}B/${smallCount}S); color=${colorPattern}`,
+        pattern: sizePattern,
+        colorPattern,
+        bigCount,
+        smallCount,
+        colorRuns
+    };
+}
+
+function getLockedSixPrediction(userId) {
+    initState(userId);
+    const lock = userStates[userId].sixPredictionLock;
+    return lock && lock.type && lock.val ? lock : null;
+}
+
+function setLockedSixPrediction(userId, signal, sourceIssue) {
+    initState(userId);
+    userStates[userId].sixPredictionLock = {
+        type: signal.type,
+        channel: signal.channel || signal.type,
+        val: signal.val,
+        pattern: signal.pattern,
+        colorPattern: signal.colorPattern,
+        rule: signal.rule,
+        sourceIssue: String(sourceIssue || ''),
+        losses: Number(userStates[userId].sixPredictionLock?.losses || 0)
+    };
+}
+
+function clearLockedSixPrediction(userId) {
+    initState(userId);
+    userStates[userId].sixPredictionLock = null;
+}
+
+function sixChannelToken(row, channel) {
+    return channel === 'COLOR' ? sixPatternColor(row) : sixPatternSide(row);
+}
+
+function sixChannelPredictionValue(token, channel) {
+    if (channel === 'COLOR') return token === 'R' ? 'GREEN' : 'RED';
+    return oppositeSixSide(token);
+}
+
+function buildSixChannelSignal(history, channel) {
+    const rows = Array.isArray(history) ? history.slice(0, 6) : [];
+    if (rows.length < 6) return { skip: true, reason: `Need 6 valid ${channel} results`, channel };
+    const values = rows.map(row => sixChannelToken(row, channel));
+    if (values.some(value => !value)) {
+        return { skip: true, reason: `Latest 6 ${channel} results contain invalid values`, channel };
+    }
+
+    const first = values[0];
+    const second = channel === 'COLOR' ? 'G' : 'S';
+    const opposite = channel === 'COLOR' ? 'G' : 'S';
+    const countFirst = values.filter(value => value === first).length;
+    const countSecond = values.filter(value => value !== first).length;
+    const pattern = values.join('');
+    const doubles = [];
+    for (let i = 0; i < values.length - 1; i++) {
+        if (values[i] === values[i + 1]) doubles.push({ value: values[i], index: i });
+    }
+
+    if ((countFirst === 4 && countSecond === 2) || (countFirst === 2 && countSecond === 4)) {
+        if (!doubles.length) {
+            return { skip: true, channel, pattern, reason: `${channel} 4/2 count without visible double` };
+        }
+        const counts = doubles.reduce((out, item) => {
+            out[item.value] = (out[item.value] || 0) + 1;
+            return out;
+        }, {});
+        const doubleSide = [...new Set(doubles.map(item => item.value))].sort((a, b) =>
+            (counts[b] || 0) - (counts[a] || 0) ||
+            doubles.find(item => item.value === a).index - doubles.find(item => item.value === b).index
+        )[0];
+        const predictedToken = channel === 'COLOR' ? (doubleSide === 'R' ? 'G' : 'R') : (doubleSide === 'B' ? 'S' : 'B');
+        return {
+            skip: false, channel, type: channel === 'COLOR' ? 'COLOR' : 'SIZE',
+            val: sixChannelPredictionValue(predictedToken, channel),
+            pattern, rule: '4/2_DOUBLE_OPPOSITE', doubleSide,
+            countFirst, countSecond, conf: 50, historyBased: true,
+            mode: `${channel} SIX-RESULT OPPOSITE`, pat: `${channel}-DOUBLE-OPPOSITE`,
+            decisionReason: `${channel} ${pattern}: 4/2 with ${doubleSide}${doubleSide}; opposite prediction`,
+            bets: [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: sixChannelPredictionValue(predictedToken, channel), kind: channel.toLowerCase() }]
+        };
+    }
+
+    const zigzag = values.every((value, index) => index === 0 || value !== values[index - 1]);
+    if (countFirst === 3 && countSecond === 3 && zigzag) {
+        // Normal continuation is opposite of newest value; requested signal is its opposite.
+        const predictedToken = first;
+        return {
+            skip: false, channel, type: channel === 'COLOR' ? 'COLOR' : 'SIZE',
+            val: sixChannelPredictionValue(predictedToken, channel),
+            pattern, rule: '3/3_ZIGZAG_OPPOSITE', countFirst, countSecond,
+            conf: 50, historyBased: true, mode: `${channel} SIX-RESULT OPPOSITE`, pat: `${channel}-ZIGZAG-OPPOSITE`,
+            decisionReason: `${channel} ${pattern}: strict 3/3 zigzag; opposite continuation`,
+            bets: [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: sixChannelPredictionValue(predictedToken, channel), kind: channel.toLowerCase() }]
+        };
+    }
+
+    return { skip: true, channel, pattern, reason: `${channel} has no requested 4/2 double or 3/3 zigzag pattern` };
+}
+
+function backtestSixChannel(history, channel) {
+    const rows = Array.isArray(history) ? history : [];
+    let tested = 0, wins = 0, losses = 0;
+    const limit = rows.length - 6;
+    for (let index = 1; index < limit; index++) {
+        const signal = buildSixChannelSignal(rows.slice(index, index + 6), channel);
+        if (signal.skip) continue;
+        const actualToken = sixChannelToken(rows[index - 1], channel);
+        const predictedToken = channel === 'COLOR'
+            ? (signal.val === 'RED' ? 'R' : 'G')
+            : (signal.val === 'BIG' ? 'B' : 'S');
+        tested++;
+        if (actualToken === predictedToken) wins++;
+        else losses++;
+    }
+    return { channel, tested, wins, losses, winRate: tested ? wins / tested : 0, lossRate: tested ? losses / tested : 1 };
+}
+
+function chooseSixChannel(history, currentHistory) {
+    const candidates = ['SIZE', 'COLOR'].map(channel => ({
+        channel,
+        signal: buildSixChannelSignal(currentHistory, channel),
+        report: backtestSixChannel(history, channel)
+    }));
+    const usable = candidates.filter(item => !item.signal.skip);
+    if (!usable.length) return { signal: { skip: true, reason: 'Neither SIZE nor COLOR has a requested visible pattern' }, reports: candidates.map(item => item.report) };
+    usable.sort((a, b) => b.report.winRate - a.report.winRate || a.report.losses - b.report.losses || b.report.tested - a.report.tested);
+    const selected = usable[0];
+    selected.signal.historicalTested = selected.report.tested;
+    selected.signal.historicalWins = selected.report.wins;
+    selected.signal.historicalLosses = selected.report.losses;
+    selected.signal.historicalWinRate = Math.round(selected.report.winRate * 100);
+    selected.signal.decisionReason += ` | selected ${selected.channel}; SIZE ${candidates[0].report.wins}/${candidates[0].report.tested}, COLOR ${candidates[1].report.wins}/${candidates[1].report.tested}`;
+    return { signal: selected.signal, reports: candidates.map(item => item.report) };
+}
+
 function calculatePastedModePrediction(list, state) {
     if (!Array.isArray(list) || !list[0]) return null;
     const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
@@ -2901,27 +3163,46 @@ function calculatePastedModePrediction(list, state) {
 }
 
 async function decidePrediction(list, currentLevel, userId) {
-    if (!Array.isArray(list) || list.length < 2) return null;
+    if (!Array.isArray(list) || list.length < 1) return null;
     initState(userId);
     const cfgMode = String(autobetCfg[userId]?.mode || 'SIZE').toUpperCase();
     if (cfgMode === 'COMBINED') return { skip: true, reason: 'Combined mode uses its live source predictor' };
+    const state = userStates[userId];
+    if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
 
-    const currentResult = getResultNumber(list[0]);
-    if (currentResult === null) {
-        return { skip: true, reason: 'Current result is unavailable' };
+    const locked = getLockedSixPrediction(userId);
+    if (locked) {
+        return {
+            type: locked.type, val: locked.val, conf: 50, historyBased: true,
+            channel: locked.channel, pat: locked.rule || 'LOCKED-UNTIL-WIN',
+            mode: `${locked.channel || locked.type} LOCKED UNTIL WIN`,
+            pattern: locked.pattern, colorPattern: locked.colorPattern,
+            decisionReason: `Locked ${locked.channel || locked.type} prediction; repeat ${locked.val} until WIN (losses=${locked.losses || 0})`,
+            bets: [{ type: locked.type, val: locked.val, kind: locked.type === 'COLOR' ? 'color' : 'size' }]
+        };
     }
 
-    const oldHistory = await fetchLuciferOldHistoryForAnalysis();
-    const analysisHistory = oldHistory.length >= 2 ? oldHistory : list;
-    const historySignal = analyzeCalculatedResultMode(
-        analysisHistory,
-        list[0]?.issueNumber ?? list[0]?.issue,
-        currentResult
-    );
+    const luciferHistory = await fetchLuciferFullHistory();
+    const analysisHistory = luciferHistory.length >= 6 ? luciferHistory : list;
+    let channel = state.activeSixChannel === 'COLOR' ? 'COLOR' : state.activeSixChannel === 'SIZE' ? 'SIZE' : null;
+    let signal;
 
-    return historySignal || generateRandomBigSmallFallback(
-        list[0]?.issueNumber ?? list[0]?.issue
-    );
+    if (channel) {
+        signal = buildSixChannelSignal(analysisHistory, channel);
+        if (signal.skip) return signal;
+    } else {
+        const selected = chooseSixChannel(analysisHistory, analysisHistory);
+        signal = selected.signal;
+        if (signal.skip) return signal;
+        channel = signal.channel;
+        state.activeSixChannel = channel;
+    }
+
+    signal.channelLosses = Number(state.channelLosses[channel] || 0);
+    signal.decisionReason += ` | ${channel} loss streak ${signal.channelLosses}/5`;
+    const sourceIssue = analysisHistory[0]?.issueNumber || list[0]?.issueNumber;
+    setLockedSixPrediction(userId, signal, sourceIssue);
+    return signal;
 }
 
 function recordLossStreakHit(userId) {
@@ -2950,6 +3231,22 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     // Do not change prediction mode after WIN or LOSS. The next period's
     // history selector chooses its own SIZE/COLOUR signal.
     state.pastedMode = false;
+    if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
+    const activeChannel = state.activeSixChannel === 'COLOR' ? 'COLOR' : 'SIZE';
+    if (wasWin) {
+        state.channelLosses[activeChannel] = 0;
+        clearLockedSixPrediction(userId);
+    } else {
+        state.channelLosses[activeChannel] = Number(state.channelLosses[activeChannel] || 0) + 1;
+        if (state.sixPredictionLock) state.sixPredictionLock.losses = Number(state.sixPredictionLock.losses || 0) + 1;
+        if (state.channelLosses[activeChannel] >= 5) {
+            state.activeSixChannel = activeChannel === 'SIZE' ? 'COLOR' : 'SIZE';
+            state.channelLosses[state.activeSixChannel] = 0;
+            state.channelSwitches = Number(state.channelSwitches || 0) + 1;
+            clearLockedSixPrediction(userId);
+            console.warn(`[CHANNEL SWITCH] ${userId}: ${activeChannel} reached 5 losses; switching to ${state.activeSixChannel}`);
+        }
+    }
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[RESULT] ${wasWin ? 'WIN' : 'LOSS'} recorded; next mode will be selected from current-period history`);
 
@@ -3173,7 +3470,9 @@ async function runPredict(userId, chatId) {
     // them eligible, while still filtering any explicitly low-confidence signal.
     const signalConfidence = Number(signal.conf ?? 90);
     const minimumConfidence = 90;
-    if (!signal.fallback && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
+    const isSixPatternSignal = signal.historyBased === true &&
+        (signal.rule === '4/2_DOUBLE_OPPOSITE' || signal.rule === '3/3_ZIGZAG_OPPOSITE');
+    if (!signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
         const reason = `Confidence ${Number.isFinite(signalConfidence) ? signalConfidence : 0}% < required ${minimumConfidence}%`;
         console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
         await send(chatId,
@@ -3218,12 +3517,12 @@ async function runPredict(userId, chatId) {
 "║    👑 EARN WITH ME AI    ║\n"+
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
-"║ Game    : BIG/SMALL\n"+
-"║ 🎮 Mode  : BigSmall+Number\n"+
+"║ Game    : SIZE/COLOR\n"+
+"║ 🎮 Mode  : Six-result opposite pattern\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
-"║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"%\n"+
+"║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"% | Hist "+String(signal.historicalWinRate ?? "-")+"%\n"+
 "║ "+(signal.type === "COLOR" ? "Color   : " : "Size    : ")+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
 "║ Source  : Netlify size + Lucifer history\n"+
@@ -3243,9 +3542,7 @@ waitLine+"\n"+
         const numberSpec = rawSpecs.find(spec => spec.type === "NUMBER");
         const specs = cfg.mode === "COMBINED"
             ? [sizeSpec, numberSpec].filter(Boolean)
-            : cfg.mode === "NUMBER"
-                ? [numberSpec].filter(Boolean)
-                : [colorSpec || sizeSpec].filter(Boolean);
+            : [colorSpec || sizeSpec || numberSpec].filter(Boolean);
         const combinedAmounts = getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel);
         for (const spec of specs) {
             const isNumber = spec.type === "NUMBER";
