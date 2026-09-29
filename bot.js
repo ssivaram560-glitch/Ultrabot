@@ -3035,62 +3035,70 @@ function sixChannelPredictionValue(token, channel) {
 
 function buildSixChannelSignal(history, channel) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
-    if (rows.length < 6) return { skip: true, reason: `Need 6 valid ${channel} results`, channel };
+    const current = rows[0];
+    const currentToken = current ? sixChannelToken(current, channel) : null;
+    if (!currentToken) {
+        return { skip: true, reason: `Current ${channel} result unavailable`, channel };
+    }
+
+    // User rule: never skip a valid result. Always predict the opposite of the
+    // current/latest result. The six-result pattern is retained as metadata.
+    const oppositeValue = sixChannelPredictionValue(currentToken, channel);
+    const base = {
+        skip: false,
+        channel,
+        type: channel === 'COLOR' ? 'COLOR' : 'SIZE',
+        val: oppositeValue,
+        pattern: '',
+        colorPattern: '',
+        conf: 50,
+        historyBased: true,
+        mode: `${channel} CURRENT OPPOSITE`,
+        pat: `${channel}-CURRENT-OPPOSITE`,
+        decisionReason: `${channel} current ${currentToken} -> opposite ${oppositeValue}`,
+        bets: [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: oppositeValue, kind: channel.toLowerCase() }]
+    };
+
+    if (rows.length < 6) {
+        base.pattern = rows.map(row => sixChannelToken(row, channel) || '?').join('');
+        base.rule = 'CURRENT_OPPOSITE_NO_SIX_HISTORY';
+        base.decisionReason += ' | fewer than 6 history rows';
+        return base;
+    }
+
     const values = rows.map(row => sixChannelToken(row, channel));
     if (values.some(value => !value)) {
-        return { skip: true, reason: `Latest 6 ${channel} results contain invalid values`, channel };
+        base.pattern = values.map(value => value || '?').join('');
+        base.rule = 'CURRENT_OPPOSITE_INVALID_HISTORY';
+        base.decisionReason += ' | invalid older history ignored';
+        return base;
     }
 
     const first = values[0];
-    const second = channel === 'COLOR' ? 'G' : 'S';
-    const opposite = channel === 'COLOR' ? 'G' : 'S';
     const countFirst = values.filter(value => value === first).length;
-    const countSecond = values.filter(value => value !== first).length;
+    const countSecond = values.length - countFirst;
     const pattern = values.join('');
     const doubles = [];
     for (let i = 0; i < values.length - 1; i++) {
-        if (values[i] === values[i + 1]) doubles.push({ value: values[i], index: i });
+        if (values[i] === values[i + 1]) doubles.push(values[i]);
     }
-
-    if ((countFirst === 4 && countSecond === 2) || (countFirst === 2 && countSecond === 4)) {
-        if (!doubles.length) {
-            return { skip: true, channel, pattern, reason: `${channel} 4/2 count without visible double` };
-        }
-        const counts = doubles.reduce((out, item) => {
-            out[item.value] = (out[item.value] || 0) + 1;
-            return out;
-        }, {});
-        const doubleSide = [...new Set(doubles.map(item => item.value))].sort((a, b) =>
-            (counts[b] || 0) - (counts[a] || 0) ||
-            doubles.find(item => item.value === a).index - doubles.find(item => item.value === b).index
-        )[0];
-        const predictedToken = channel === 'COLOR' ? (doubleSide === 'R' ? 'G' : 'R') : (doubleSide === 'B' ? 'S' : 'B');
-        return {
-            skip: false, channel, type: channel === 'COLOR' ? 'COLOR' : 'SIZE',
-            val: sixChannelPredictionValue(predictedToken, channel),
-            pattern, rule: '4/2_DOUBLE_OPPOSITE', doubleSide,
-            countFirst, countSecond, conf: 50, historyBased: true,
-            mode: `${channel} SIX-RESULT OPPOSITE`, pat: `${channel}-DOUBLE-OPPOSITE`,
-            decisionReason: `${channel} ${pattern}: 4/2 with ${doubleSide}${doubleSide}; opposite prediction`,
-            bets: [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: sixChannelPredictionValue(predictedToken, channel), kind: channel.toLowerCase() }]
-        };
-    }
-
     const zigzag = values.every((value, index) => index === 0 || value !== values[index - 1]);
-    if (countFirst === 3 && countSecond === 3 && zigzag) {
-        // Normal continuation is opposite of newest value; requested signal is its opposite.
-        const predictedToken = first;
-        return {
-            skip: false, channel, type: channel === 'COLOR' ? 'COLOR' : 'SIZE',
-            val: sixChannelPredictionValue(predictedToken, channel),
-            pattern, rule: '3/3_ZIGZAG_OPPOSITE', countFirst, countSecond,
-            conf: 50, historyBased: true, mode: `${channel} SIX-RESULT OPPOSITE`, pat: `${channel}-ZIGZAG-OPPOSITE`,
-            decisionReason: `${channel} ${pattern}: strict 3/3 zigzag; opposite continuation`,
-            bets: [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: sixChannelPredictionValue(predictedToken, channel), kind: channel.toLowerCase() }]
-        };
-    }
 
-    return { skip: true, channel, pattern, reason: `${channel} has no requested 4/2 double or 3/3 zigzag pattern` };
+    base.pattern = pattern;
+    base.countFirst = countFirst;
+    base.countSecond = countSecond;
+    if ((countFirst === 4 && countSecond === 2) || (countFirst === 2 && countSecond === 4)) {
+        base.rule = doubles.length ? '4/2_DOUBLE_CURRENT_OPPOSITE' : '4/2_CURRENT_OPPOSITE';
+        base.pat = `${channel}-4/2-CURRENT-OPPOSITE`;
+    } else if (countFirst === 3 && countSecond === 3 && zigzag) {
+        base.rule = '3/3_ZIGZAG_CURRENT_OPPOSITE';
+        base.pat = `${channel}-3/3-ZIGZAG-CURRENT-OPPOSITE`;
+    } else {
+        base.rule = 'CURRENT_OPPOSITE_PATTERN_OTHER';
+        base.pat = `${channel}-CURRENT-OPPOSITE`;
+    }
+    base.decisionReason += ` | latest6 ${pattern}; ${base.rule}; no-skip mode`;
+    return base;
 }
 
 function backtestSixChannel(history, channel) {
@@ -3470,8 +3478,7 @@ async function runPredict(userId, chatId) {
     // them eligible, while still filtering any explicitly low-confidence signal.
     const signalConfidence = Number(signal.conf ?? 90);
     const minimumConfidence = 90;
-    const isSixPatternSignal = signal.historyBased === true &&
-        (signal.rule === '4/2_DOUBLE_OPPOSITE' || signal.rule === '3/3_ZIGZAG_OPPOSITE');
+    const isSixPatternSignal = signal.historyBased === true;
     if (!signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
         const reason = `Confidence ${Number.isFinite(signalConfidence) ? signalConfidence : 0}% < required ${minimumConfidence}%`;
         console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
