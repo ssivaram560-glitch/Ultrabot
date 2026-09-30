@@ -1778,7 +1778,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -2342,7 +2342,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -3220,6 +3220,26 @@ async function decidePrediction(list, currentLevel, userId) {
     const sizeSpecial = fiveRule.ready && isSpecialSixPattern(sizePattern);
     const colorSpecial = fiveRule.ready && isSpecialSixPattern(colorPattern);
     const bothSpecial = sizeSpecial && colorSpecial;
+    // After a WIN, if the same channel pattern appears again, switch to the
+    // opposite channel before generating the next signal.
+    const winPatternChannel = state.lastWinChannel === 'COLOR' ? 'COLOR' : state.lastWinChannel === 'SIZE' ? 'SIZE' : null;
+    const winPattern = String(state.lastWinPattern || '');
+    const repeatedWinPattern = Boolean(winPatternChannel && winPattern &&
+        ((winPatternChannel === 'SIZE' && sizePattern === winPattern) ||
+         (winPatternChannel === 'COLOR' && colorPattern === winPattern)));
+    if (repeatedWinPattern) {
+        const forcedChannel = winPatternChannel === 'SIZE' ? 'COLOR' : 'SIZE';
+        const issueKey = `${fiveRule.issue}:${winPatternChannel}:${winPattern}`;
+        if (state.lastSamePatternSwitchIssue !== issueKey) {
+            state.activeSixChannel = forcedChannel;
+            state.channelLosses[forcedChannel] = 0;
+            state.lastSamePatternSwitchIssue = issueKey;
+            clearLockedSixPrediction(userId);
+            console.warn(`[REPEAT-WIN-PATTERN] ${userId}: ${winPatternChannel} pattern ${winPattern} repeated; switching to ${forcedChannel}`);
+        }
+    } else if (state.lastSamePatternSwitchIssue && fiveRule.issue !== String(state.lastSamePatternSwitchIssue).split(':')[0]) {
+        state.lastSamePatternSwitchIssue = null;
+    }
     if (bothSpecial) {
         if (!state.specialPatternSkipActive) {
             state.skipPeriodsRemaining = 5;
@@ -3348,6 +3368,10 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
     const activeChannel = state.activeSixChannel === 'COLOR' ? 'COLOR' : 'SIZE';
     if (wasWin) {
+        const winningLock = state.sixPredictionLock;
+        state.lastWinPattern = winningLock?.pattern || null;
+        state.lastWinChannel = winningLock?.channel || activeChannel;
+        state.lastSamePatternSwitchIssue = null;
         state.channelLosses[activeChannel] = 0;
         state.activeSixChannel = null;
         state.skipPeriodsRemaining = 0;
