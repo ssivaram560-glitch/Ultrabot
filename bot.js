@@ -1778,7 +1778,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0 };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -2342,7 +2342,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0 };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -3033,6 +3033,16 @@ function sixChannelPredictionValue(token, channel) {
     return oppositeSixSide(token);
 }
 
+function sixChannelValueFromToken(token, channel) {
+    if (channel === 'COLOR') return token === 'R' ? 'RED' : 'GREEN';
+    return token === 'B' ? 'BIG' : 'SMALL';
+}
+
+function isSpecialSixPattern(pattern) {
+    const normalized = String(pattern || '').toUpperCase().replace(/[RG]/g, value => value === 'R' ? 'B' : 'S');
+    return new Set(['BBSSBB', 'BSBSBS', 'SSBBSS', 'SBSBSB', 'BBBSSS', 'SSSBBB']).has(normalized);
+}
+
 function buildSixChannelSignal(history, channel) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
     const current = rows[0];
@@ -3088,8 +3098,13 @@ function buildSixChannelSignal(history, channel) {
     base.countFirst = countFirst;
     base.countSecond = countSecond;
     if ((countFirst === 4 && countSecond === 2) || (countFirst === 2 && countSecond === 4)) {
-        base.rule = doubles.length ? '4/2_DOUBLE_CURRENT_OPPOSITE' : '4/2_CURRENT_OPPOSITE';
-        base.pat = `${channel}-4/2-CURRENT-OPPOSITE`;
+        // 4/2 double pattern: predict the majority side. Example BBBBSS -> BIG.
+        const majorityToken = countFirst > countSecond ? first : values.find(value => value !== first);
+        base.val = sixChannelValueFromToken(majorityToken, channel);
+        base.bets = [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: base.val, kind: channel.toLowerCase() }];
+        base.rule = doubles.length ? '4/2_DOUBLE_MAJORITY' : '4/2_MAJORITY';
+        base.pat = `${channel}-4/2-MAJORITY`;
+        base.decisionReason = `${channel} latest6 ${pattern}: majority ${majorityToken} -> ${base.val}`;
     } else if (countFirst === 3 && countSecond === 3 && zigzag) {
         base.rule = '3/3_ZIGZAG_CURRENT_OPPOSITE';
         base.pat = `${channel}-3/3-ZIGZAG-CURRENT-OPPOSITE`;
@@ -3170,6 +3185,25 @@ function calculatePastedModePrediction(list, state) {
     };
 }
 
+function inspectFiveSameRule(history) {
+    const rows = Array.isArray(history) ? history.slice(0, 6) : [];
+    if (rows.length < 6) return { ready: false, sizeFive: false, colorFive: false, issue: '' };
+    const sizeValues = rows.map(row => sixPatternSide(row));
+    const colorValues = rows.map(row => sixPatternColor(row));
+    const countAtLeastFive = values => {
+        if (values.some(value => !value)) return false;
+        return Math.max(...[...new Set(values)].map(value => values.filter(item => item === value).length)) >= 5;
+    };
+    return {
+        ready: true,
+        sizeFive: countAtLeastFive(sizeValues),
+        colorFive: countAtLeastFive(colorValues),
+        sizePattern: sizeValues.join(''),
+        colorPattern: colorValues.join(''),
+        issue: String(rows[0]?.issueNumber || rows[0]?.issue || '')
+    };
+}
+
 async function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || list.length < 1) return null;
     initState(userId);
@@ -3177,6 +3211,80 @@ async function decidePrediction(list, currentLevel, userId) {
     if (cfgMode === 'COMBINED') return { skip: true, reason: 'Combined mode uses its live source predictor' };
     const state = userStates[userId];
     if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
+
+    const luciferHistory = await fetchLuciferFullHistory();
+    const analysisHistory = luciferHistory.length >= 6 ? luciferHistory : list;
+    const fiveRule = inspectFiveSameRule(analysisHistory);
+    const sizePattern = fiveRule.sizePattern || '';
+    const colorPattern = fiveRule.colorPattern || '';
+    const sizeSpecial = fiveRule.ready && isSpecialSixPattern(sizePattern);
+    const colorSpecial = fiveRule.ready && isSpecialSixPattern(colorPattern);
+    const bothSpecial = sizeSpecial && colorSpecial;
+    if (bothSpecial) {
+        if (!state.specialPatternSkipActive) {
+            state.skipPeriodsRemaining = 5;
+            state.specialPatternSkipActive = true;
+            clearLockedSixPrediction(userId);
+            console.warn(`[SPECIAL-PATTERN] ${userId}: SIZE=${sizePattern} COLOR=${colorPattern}; skipping 5 periods`);
+        }
+        if (Number(state.skipPeriodsRemaining) > 0) {
+            state.skipPeriodsRemaining--;
+            return {
+                skip: true,
+                reason: `Special pattern in both SIZE and COLOR (${sizePattern}/${colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
+                pattern: sizePattern,
+                colorPattern,
+                specialPatternSkip: true
+            };
+        }
+    } else {
+        state.specialPatternSkipActive = false;
+    }
+    if (sizeSpecial !== colorSpecial) {
+        const forcedChannel = sizeSpecial ? 'COLOR' : 'SIZE';
+        if (state.activeSixChannel !== forcedChannel) {
+            state.activeSixChannel = forcedChannel;
+            state.channelLosses[forcedChannel] = 0;
+            clearLockedSixPrediction(userId);
+            console.warn(`[SPECIAL-PATTERN] ${userId}: ${sizeSpecial ? sizePattern : colorPattern}; switching to ${forcedChannel}`);
+        }
+    }
+    if (fiveRule.ready) {
+        const bothFive = fiveRule.sizeFive && fiveRule.colorFive;
+        if (bothFive) {
+            // One five-period pause per continuous both-five event.
+            if (!state.fiveSameSkipActive) {
+                state.skipPeriodsRemaining = 5;
+                state.fiveSameSkipActive = true;
+                state.lastFiveSameIssue = fiveRule.issue;
+                clearLockedSixPrediction(userId);
+                console.warn(`[FIVE-SAME] ${userId}: SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}; skipping 5 periods`);
+            }
+            if (Number(state.skipPeriodsRemaining) > 0) {
+                state.skipPeriodsRemaining--;
+                return {
+                    skip: true,
+                    reason: `SIZE and COLOR both have 5 same in latest 6 (${fiveRule.sizePattern}/${fiveRule.colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
+                    pattern: fiveRule.sizePattern,
+                    colorPattern: fiveRule.colorPattern,
+                    fiveSameSkip: true
+                };
+            }
+        } else {
+            // Re-arm only after the both-five condition has cleared.
+            state.fiveSameSkipActive = false;
+            state.skipPeriodsRemaining = 0;
+            if (fiveRule.sizeFive || fiveRule.colorFive) {
+            const forcedChannel = fiveRule.sizeFive ? 'COLOR' : 'SIZE';
+            if (state.activeSixChannel !== forcedChannel) {
+                state.activeSixChannel = forcedChannel;
+                state.channelLosses[forcedChannel] = 0;
+                clearLockedSixPrediction(userId);
+                console.warn(`[FIVE-SAME] ${userId}: switching to ${forcedChannel}; SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}`);
+            }
+        }
+        }
+    }
 
     const locked = getLockedSixPrediction(userId);
     if (locked) {
@@ -3190,8 +3298,6 @@ async function decidePrediction(list, currentLevel, userId) {
         };
     }
 
-    const luciferHistory = await fetchLuciferFullHistory();
-    const analysisHistory = luciferHistory.length >= 6 ? luciferHistory : list;
     let channel = state.activeSixChannel === 'COLOR' ? 'COLOR' : state.activeSixChannel === 'SIZE' ? 'SIZE' : null;
     let signal;
 
@@ -3243,6 +3349,11 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     const activeChannel = state.activeSixChannel === 'COLOR' ? 'COLOR' : 'SIZE';
     if (wasWin) {
         state.channelLosses[activeChannel] = 0;
+        state.activeSixChannel = null;
+        state.skipPeriodsRemaining = 0;
+        state.lastFiveSameIssue = null;
+        state.fiveSameSkipActive = false;
+        state.specialPatternSkipActive = false;
         clearLockedSixPrediction(userId);
     } else {
         state.channelLosses[activeChannel] = Number(state.channelLosses[activeChannel] || 0) + 1;
