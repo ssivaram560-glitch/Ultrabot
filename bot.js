@@ -3039,8 +3039,16 @@ function sixChannelValueFromToken(token, channel) {
 }
 
 function isSpecialSixPattern(pattern) {
-    const normalized = String(pattern || '').toUpperCase().replace(/[RG]/g, value => value === 'R' ? 'B' : 'S');
-    return new Set(['BBSSBB', 'BSBSBS', 'SSBBSS', 'SBSBSB', 'BBBSSS', 'SSSBBB']).has(normalized);
+    const raw = String(pattern || '').toUpperCase();
+    const explicit = new Set([
+        'BBBSSS', 'SSSBBB', 'BBSSBB', 'SSBBSS', // SIZE block/double patterns
+        'BSBSBS', 'SBSBSB',                     // SIZE zigzag patterns
+        'GGGRRR', 'RRRGGG', 'GGRRGG', 'RRGGRR', // COLOR block/double patterns
+        'GRGRGR', 'RGRGRG'                      // COLOR zigzag patterns
+    ]);
+    if (explicit.has(raw)) return true;
+    const normalized = raw.replace(/[RG]/g, value => value === 'R' ? 'B' : 'S');
+    return new Set(['BBBSSS', 'SSSBBB', 'BBSSBB', 'SSBBSS', 'BSBSBS', 'SBSBSB']).has(normalized);
 }
 
 function classifyRecentSixPattern(values) {
@@ -3297,7 +3305,8 @@ async function decidePrediction(list, currentLevel, userId) {
     }
     if (sizeSpecial !== colorSpecial) {
         const forcedChannel = sizeSpecial ? 'COLOR' : 'SIZE';
-        if (state.activeSixChannel !== forcedChannel) {
+        const lockedChannel = state.sixPredictionLock?.channel || null;
+        if (state.activeSixChannel !== forcedChannel || lockedChannel !== forcedChannel) {
             state.activeSixChannel = forcedChannel;
             state.channelLosses[forcedChannel] = 0;
             clearLockedSixPrediction(userId);
