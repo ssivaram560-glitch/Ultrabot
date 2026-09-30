@@ -1778,7 +1778,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -2342,7 +2342,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -3043,6 +3043,23 @@ function isSpecialSixPattern(pattern) {
     return new Set(['BBSSBB', 'BSBSBS', 'SSBBSS', 'SBSBSB', 'BBBSSS', 'SSSBBB']).has(normalized);
 }
 
+function classifyRecentSixPattern(values) {
+    const tokens = Array.isArray(values) ? values : [];
+    if (tokens.length !== 6 || tokens.some(value => !value)) return { kind: 'OTHER', pattern: tokens.join('') };
+    const first = tokens[0];
+    const opposite = first === 'B' || first === 'R' ? (first === 'B' ? 'S' : 'G') : (first === 'S' ? 'B' : 'R');
+    const countFirst = tokens.filter(value => value === first).length;
+    const countSecond = tokens.length - countFirst;
+    if ((countFirst === 4 && countSecond === 2) || (countFirst === 2 && countSecond === 4)) {
+        return { kind: 'DOUBLE', pattern: first + first + opposite + opposite + first + first };
+    }
+    const zigzag = tokens.every((value, index) => index === 0 || value !== tokens[index - 1]);
+    if (countFirst === 3 && countSecond === 3 && zigzag) {
+        return { kind: 'ZIGZAG', pattern: Array.from({ length: 6 }, (_, i) => i % 2 === 0 ? first : opposite).join('') };
+    }
+    return { kind: 'OTHER', pattern: tokens.join('') };
+}
+
 function buildSixChannelSignal(history, channel) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
     const current = rows[0];
@@ -3087,13 +3104,17 @@ function buildSixChannelSignal(history, channel) {
     const first = values[0];
     const countFirst = values.filter(value => value === first).length;
     const countSecond = values.length - countFirst;
-    const pattern = values.join('');
+    const rawPattern = values.join('');
     const doubles = [];
     for (let i = 0; i < values.length - 1; i++) {
         if (values[i] === values[i + 1]) doubles.push(values[i]);
     }
     const zigzag = values.every((value, index) => index === 0 || value !== values[index - 1]);
+    const recentClass = classifyRecentSixPattern(values);
+    const pattern = rawPattern;
 
+    base.rawPattern = rawPattern;
+    base.recentPattern = recentClass.pattern;
     base.pattern = pattern;
     base.countFirst = countFirst;
     base.countSecond = countSecond;
@@ -3102,12 +3123,12 @@ function buildSixChannelSignal(history, channel) {
         const majorityToken = countFirst > countSecond ? first : values.find(value => value !== first);
         base.val = sixChannelValueFromToken(majorityToken, channel);
         base.bets = [{ type: channel === 'COLOR' ? 'COLOR' : 'SIZE', val: base.val, kind: channel.toLowerCase() }];
-        base.rule = doubles.length ? '4/2_DOUBLE_MAJORITY' : '4/2_MAJORITY';
-        base.pat = `${channel}-4/2-MAJORITY`;
-        base.decisionReason = `${channel} latest6 ${pattern}: majority ${majorityToken} -> ${base.val}`;
+        base.rule = '4/2_DOUBLE_MAJORITY';
+        base.pat = `${channel}-DOUBLE-${recentClass.pattern}`;
+        base.decisionReason = `${channel} latest6 ${pattern} -> recent double ${recentClass.pattern}; majority ${majorityToken} -> ${base.val}`;
     } else if (countFirst === 3 && countSecond === 3 && zigzag) {
         base.rule = '3/3_ZIGZAG_CURRENT_OPPOSITE';
-        base.pat = `${channel}-3/3-ZIGZAG-CURRENT-OPPOSITE`;
+        base.pat = `${channel}-ZIGZAG-${recentClass.pattern}-OPPOSITE`;
     } else {
         base.rule = 'CURRENT_OPPOSITE_PATTERN_OTHER';
         base.pat = `${channel}-CURRENT-OPPOSITE`;
@@ -3185,6 +3206,18 @@ function calculatePastedModePrediction(list, state) {
     };
 }
 
+function classifyPatternFamily(pattern) {
+    const raw = String(pattern || '').toUpperCase();
+    const values = raw.replace(/R/g, 'B').replace(/G/g, 'S').split('');
+    if (values.length !== 6 || values.some(value => value !== 'B' && value !== 'S')) return 'OTHER';
+    const b = values.filter(value => value === 'B').length;
+    const s = values.length - b;
+    if (b === 4 && s === 2) return '4B2S';
+    if (b === 2 && s === 4) return '4S2B';
+    if (b === 3 && s === 3) return values[0] === 'B' ? '3B3S' : '3S3B';
+    return 'OTHER';
+}
+
 function inspectFiveSameRule(history) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
     if (rows.length < 6) return { ready: false, sizeFive: false, colorFive: false, issue: '' };
@@ -3224,18 +3257,20 @@ async function decidePrediction(list, currentLevel, userId) {
     // opposite channel before generating the next signal.
     const winPatternChannel = state.lastWinChannel === 'COLOR' ? 'COLOR' : state.lastWinChannel === 'SIZE' ? 'SIZE' : null;
     const winPattern = String(state.lastWinPattern || '');
-    const repeatedWinPattern = Boolean(winPatternChannel && winPattern &&
-        ((winPatternChannel === 'SIZE' && sizePattern === winPattern) ||
-         (winPatternChannel === 'COLOR' && colorPattern === winPattern)));
+    const winPatternFamily = state.lastWinPatternFamily || classifyPatternFamily(winPattern);
+    const currentPatternFamily = winPatternChannel === 'COLOR'
+        ? classifyPatternFamily(colorPattern)
+        : classifyPatternFamily(sizePattern);
+    const repeatedWinPattern = Boolean(winPatternChannel && winPatternFamily !== 'OTHER' && currentPatternFamily === winPatternFamily);
     if (repeatedWinPattern) {
         const forcedChannel = winPatternChannel === 'SIZE' ? 'COLOR' : 'SIZE';
-        const issueKey = `${fiveRule.issue}:${winPatternChannel}:${winPattern}`;
+        const issueKey = `${fiveRule.issue}:${winPatternChannel}:${winPatternFamily}`;
         if (state.lastSamePatternSwitchIssue !== issueKey) {
             state.activeSixChannel = forcedChannel;
             state.channelLosses[forcedChannel] = 0;
             state.lastSamePatternSwitchIssue = issueKey;
             clearLockedSixPrediction(userId);
-            console.warn(`[REPEAT-WIN-PATTERN] ${userId}: ${winPatternChannel} pattern ${winPattern} repeated; switching to ${forcedChannel}`);
+            console.warn(`[REPEAT-WIN-PATTERN] ${userId}: ${winPatternChannel} family ${winPatternFamily} repeated; switching to ${forcedChannel}`);
         }
     } else if (state.lastSamePatternSwitchIssue && fiveRule.issue !== String(state.lastSamePatternSwitchIssue).split(':')[0]) {
         state.lastSamePatternSwitchIssue = null;
@@ -3296,7 +3331,8 @@ async function decidePrediction(list, currentLevel, userId) {
             state.skipPeriodsRemaining = 0;
             if (fiveRule.sizeFive || fiveRule.colorFive) {
             const forcedChannel = fiveRule.sizeFive ? 'COLOR' : 'SIZE';
-            if (state.activeSixChannel !== forcedChannel) {
+            const lockedChannel = state.sixPredictionLock?.channel || null;
+            if (state.activeSixChannel !== forcedChannel || lockedChannel !== forcedChannel) {
                 state.activeSixChannel = forcedChannel;
                 state.channelLosses[forcedChannel] = 0;
                 clearLockedSixPrediction(userId);
@@ -3370,6 +3406,7 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     if (wasWin) {
         const winningLock = state.sixPredictionLock;
         state.lastWinPattern = winningLock?.pattern || null;
+        state.lastWinPatternFamily = classifyPatternFamily(state.lastWinPattern);
         state.lastWinChannel = winningLock?.channel || activeChannel;
         state.lastSamePatternSwitchIssue = null;
         state.channelLosses[activeChannel] = 0;
