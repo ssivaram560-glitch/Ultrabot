@@ -1778,7 +1778,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null, betGate:"ARMED", watchReason:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -2342,7 +2342,7 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null, betGate:"ARMED", watchReason:null };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
@@ -3399,6 +3399,28 @@ function getModeFromHistory(state) {
     return state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
 }
 
+function getBetGate(userId) {
+    initState(userId);
+    const gate = userStates[userId].betGate;
+    return gate === 'WATCH' ? 'WATCH' : 'ARMED';
+}
+
+function updateBetGateAfterResult(userId, wasWin, predictionEvaluated = true) {
+    if (!predictionEvaluated) return;
+    initState(userId);
+    const state = userStates[userId];
+    if (wasWin) {
+        // A WATCH win unlocks the NEXT period; the current WATCH period never bets.
+        state.betGate = 'ARMED';
+        state.watchReason = null;
+        console.log(`[BET-GATE] ${userId}: WIN -> next period ARMED`);
+    } else {
+        state.betGate = 'WATCH';
+        state.watchReason = 'LOSS: waiting for a WIN; next period is WATCH';
+        console.log(`[BET-GATE] ${userId}: LOSS -> next period WATCH`);
+    }
+}
+
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
     initUser(userId);
     initState(userId);
@@ -3689,10 +3711,13 @@ async function runPredict(userId, chatId) {
             : "🤖 AutoBet: OFF";
         canBet = false;
     } else if (!signal.fallback) {
-        canBet = true;
+        const gate = getBetGate(userId);
+        canBet = gate === 'ARMED';
         const sequence = cfg.mode === "NUMBER" ? cfg.customNumberBets : cfg.customBets;
         const curBet = sequence[st.level - 1] ?? (cfg.baseBet * (MULT[st.level - 1] || 1));
-        abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
+        abLine = canBet
+            ? (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet
+            : "👀 WATCH: waiting for WIN (next period can bet)";
     } else {
         canBet = false;
     }
@@ -3939,6 +3964,9 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
 
         if (combinedResult) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
         else updateAfterResult(userId, win, actualSize, betPlaced);
+        // Bet gate is independent of whether this period had a stake: a WATCH
+        // result is used to unlock the following period only after a WIN.
+        updateBetGateAfterResult(userId, win, Array.isArray(evaluationBets) && evaluationBets.length > 0);
 
         const s = stats[userId];
         if (betPlaced) {
