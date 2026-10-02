@@ -3461,10 +3461,11 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[RESULT] ${wasWin ? 'WIN' : 'LOSS'} recorded; next mode will be selected from current-period history`);
 
-    // A win resets the martingale level for both SIZE and COLOUR, including
-    // WATCH settlements where no live stake was placed.
+    // Only a WIN from a real placed bet resets the martingale level. A
+    // WATCH-only WIN unlocks the next period but preserves the level reached
+    // before WATCH, so the resumed bet continues at that same level.
     const st = autobetState[userId];
-    if (wasWin && st) {
+    if (wasWin && st && betPlaced) {
         st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
         st.inMart = false; st.consecutiveLoss = 0;
         st.lossStreakHitRecorded = false;
