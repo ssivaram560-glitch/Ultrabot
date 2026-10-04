@@ -659,6 +659,8 @@ const LUCIFER_OLD_ANALYSIS_URL = "https://luciferapi.com/30sec.php";
 const COMBINED_PAGE_URL = "https://endearing-bavarois-067272.netlify.app/";
 // BigSmall+Number uses the requested one-minute draw source.
 const COMBINED_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+// Authoritative 1-minute source used by uploaded 3.html.
+const WHIMSICAL_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
 // Lucifer root returns the complete historical dataset used for shared number ranking.
 const LUCIFER_FULL_HISTORY_URL = "https://luciferapi.com/";
 const SITE_URL    = "https://www.ts777.co";
@@ -1039,6 +1041,35 @@ async function fetchCombinedSourceList() {
         })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
     } catch (error) {
         console.error('[COMBINED SOURCE ERROR]', error?.message || error);
+        return null;
+    }
+}
+
+// Fetch only the bounded 100 rows required by 3.html. This is the sole
+// source for BIG/SMALL mode, including both the target period and settlement.
+async function fetchWhimsicalHistory() {
+    try {
+        const response = await axios.get(WHIMSICAL_SOURCE_URL + '?pageSize=100&t=' + Date.now(), {
+            headers: {
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                'Pragma': 'no-cache',
+                'Origin': 'https://whimsical-buttercream-00c705.netlify.app',
+                'Referer': 'https://whimsical-buttercream-00c705.netlify.app/',
+                'User-Agent': 'Mozilla/5.0'
+            },
+            timeout: 10000,
+            maxContentLength: 512 * 1024,
+            maxBodyLength: 512 * 1024,
+            validateStatus: status => status >= 200 && status < 300
+        });
+        const raw = Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+        return raw.slice(0, 100).map(item => ({
+            issueNumber: String(item?.issueNumber ?? item?.issue ?? ''),
+            number: String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1)
+        })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
+    } catch (error) {
+        console.error('[WHIMSICAL SOURCE ERROR] retryable:', error?.message || error);
         return null;
     }
 }
@@ -1695,8 +1726,8 @@ function generateRandomBigSmallFallback(period) {
 async function fetchListForUser(userId) {
     const mode = String(autobetCfg[userId]?.mode || '').toUpperCase();
     if (mode === 'COMBINED') return await fetchCombinedSourceList();
-    // Big/Small uses the Lucifer 30-second history directly.
-    return await fetchList();
+    // BIG/SMALL mode follows the uploaded 3.html source exactly.
+    return await fetchWhimsicalHistory();
 }
 
 // Helper parser function
@@ -1778,7 +1809,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null, betGate:"ARMED", watchReason:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -1786,7 +1817,7 @@ function initUser(id) {
         baseBet:1, 
         maxLvl:5, 
         enabled:false,
-        mode:"SIZE", // SIZE, NUMBER, or COMBINED
+        mode:"SIZE", // SIZE, COLOR, NUMBER, or COMBINED
         customBets:[1,3,9,27,81],
         customSizeBets:[1,2,4,8,16],
         customNumberBets:[1,9,81,729,6561],
@@ -1800,7 +1831,7 @@ function initUser(id) {
             nextProfitSwitch: 0
         }
     };
-    if (autobetCfg[id].mode !== "SIZE" && autobetCfg[id].mode !== "NUMBER" && autobetCfg[id].mode !== "COMBINED") autobetCfg[id].mode = "SIZE";
+    if (!["SIZE", "COLOR", "NUMBER", "COMBINED"].includes(autobetCfg[id].mode)) autobetCfg[id].mode = "SIZE";
     if (!Array.isArray(autobetCfg[id].customBets) || !autobetCfg[id].customBets.length) autobetCfg[id].customBets = [1,3,9,27,81];
     if (!Array.isArray(autobetCfg[id].customSizeBets) || !autobetCfg[id].customSizeBets.length) autobetCfg[id].customSizeBets = [1,2,4,8,16];
     if (!Array.isArray(autobetCfg[id].customNumberBets) || !autobetCfg[id].customNumberBets.length) autobetCfg[id].customNumberBets = [1,9,81,729,6561];
@@ -1816,7 +1847,11 @@ function initUser(id) {
         nextStartTime: null,
         levelHistory: {},
         sizeLevelHistory: {},
-        numberLevelHistory: {}
+        numberLevelHistory: {},
+        // One live-bet loss puts the engine into watch mode.
+        // The next live bet is allowed only after a watch prediction wins.
+        waitingForWatchWin: false,
+        lastOutcome: null
     };
     if (!autobetState[id].levelHistory || typeof autobetState[id].levelHistory !== "object") autobetState[id].levelHistory = {};
     if (!Number.isInteger(autobetState[id].sizeLevel) || autobetState[id].sizeLevel < 1) autobetState[id].sizeLevel = autobetState[id].level || 1;
@@ -2176,7 +2211,9 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    cfg.mode === "COMBINED" ? "WinGo_1M" : "WinGo_30S",
+                // COLOR formula and NUMBER use the user's 30-second game;
+                // the legacy SIZE/COMBINED routes remain on WinGo_1M.
+                gameCode:    (cfg.mode === "NUMBER" || cfg.mode === "COLOR") ? "WinGo_30S" : "WinGo_1M",
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -2207,7 +2244,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             });
             const d = r.data || {};
             const apiMessage = String(d.msg ?? d.message ?? d.msgCode ?? "");
-            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
+            console.log(`[BET RESP] game=${params.gameCode} period=${params.issueNumber} code:${d.code} msg:${apiMessage}`);
 
             // A bet response may rotate the token. Accept it only after bet success.
             // If no valid token is returned, keep the current token unchanged.
@@ -2342,12 +2379,12 @@ function buildBSFromList(list, count = 15) {
 }
 
 function initState(userId) {
-    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastWinPatternFamily:null, lastSamePatternSwitchIssue:null, betGate:"ARMED", watchReason:null };
+    if (!userStates[userId]) userStates[userId] = { lastSitePrediction: null, resultHistory: [], mode: 'NORMAL', pastedMode: false, nextPredictionMode: 'SIZE', combinedFlipNext: false, recoveryCount: 0, winBeforeLoss: 0, lossStreak: 0, history: [], sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
     if (!Array.isArray(userStates[userId].resultHistory)) userStates[userId].resultHistory = [];
 }
 
 function modeLabel(mode) {
-    return mode === "NUMBER" ? "NUMBER" : mode === "COMBINED" ? "BIG/SMALL + NUMBER" : "BIG/SMALL";
+    return mode === "NUMBER" ? "NUMBER" : mode === "COLOR" ? "COLOR" : mode === "COMBINED" ? "BIG/SMALL + NUMBER" : "BIG/SMALL";
 }
 
 function getSequenceAmount(userId, level, kind = "default") {
@@ -2507,6 +2544,8 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
         st.inMart = false;
         st.consecutiveLoss = 0;
         st.lossStreakHitRecorded = false;
+        st.waitingForWatchWin = false;
+        st.lastOutcome = "WIN";
     } else {
         st.consecutiveLoss++;
         recordLossStreakHit(userId);
@@ -2517,6 +2556,9 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
         st.numberLevel = currentNumberLevel >= maxLevel ? 1 : currentNumberLevel + 1;
         st.level = Math.max(st.sizeLevel, st.numberLevel);
         st.inMart = st.level > 1;
+        // Do not place another live bet immediately after this loss.
+        st.waitingForWatchWin = true;
+        st.lastOutcome = "LOSS";
     }
 }
 
@@ -3039,16 +3081,8 @@ function sixChannelValueFromToken(token, channel) {
 }
 
 function isSpecialSixPattern(pattern) {
-    const raw = String(pattern || '').toUpperCase();
-    const explicit = new Set([
-        'BBBSSS', 'SSSBBB', 'BBSSBB', 'SSBBSS', // SIZE block/double patterns
-        'BSBSBS', 'SBSBSB',                     // SIZE zigzag patterns
-        'GGGRRR', 'RRRGGG', 'GGRRGG', 'RRGGRR', // COLOR block/double patterns
-        'GRGRGR', 'RGRGRG'                      // COLOR zigzag patterns
-    ]);
-    if (explicit.has(raw)) return true;
-    const normalized = raw.replace(/[RG]/g, value => value === 'R' ? 'B' : 'S');
-    return new Set(['BBBSSS', 'SSSBBB', 'BBSSBB', 'SSBBSS', 'BSBSBS', 'SBSBSB']).has(normalized);
+    const normalized = String(pattern || '').toUpperCase().replace(/[RG]/g, value => value === 'R' ? 'B' : 'S');
+    return new Set(['BBSSBB', 'BSBSBS', 'SSBBSS', 'SBSBSB', 'BBBSSS', 'SSSBBB']).has(normalized);
 }
 
 function classifyRecentSixPattern(values) {
@@ -3181,51 +3215,119 @@ function chooseSixChannel(history, currentHistory) {
     return { signal: selected.signal, reports: candidates.map(item => item.report) };
 }
 
-function calculatePastedModePrediction(list, state) {
+// Exact predictor ported from uploaded 3.html.
+const WHIMSICAL_MAP = Object.freeze({
+    STREAK: 'SBS', BALANCE: 'SBB', ALTERNATION: 'BBB',
+    TRANSITION: 'BSS', REPEAT: 'SBS', GAP: 'BSB', WEIGHTED: 'SBB'
+});
+const WHIMSICAL_MODES = Object.freeze(['STREAK', 'BALANCE', 'ALTERNATION', 'TRANSITION', 'REPEAT', 'GAP', 'WEIGHTED']);
+
+function whimsicalSize(n) {
+    return Number(n) >= 5 ? 'BIG' : 'SMALL';
+}
+function whimsicalTransition(nums) {
+    const counts = Array(10).fill(0);
+    const current = nums[0];
+    for (let i = 0; i < nums.length - 1; i++) if (nums[i] === current) counts[nums[i + 1]]++;
+    const total = counts.reduce((a, b) => a + b, 0);
+    return total ? (counts.slice(5).reduce((a, b) => a + b, 0) / total >= 0.5 ? 'BIG' : 'SMALL') : whimsicalSize(current);
+}
+function whimsicalGap(nums) {
+    const gaps = [];
+    for (let n = 0; n < 10; n++) {
+        const index = nums.indexOf(n);
+        gaps.push([index < 0 ? nums.length : index, n]);
+    }
+    const maxGap = Math.max(...gaps.map(item => item[0]));
+    const candidates = gaps.filter(item => item[0] >= maxGap * 0.75).sort((a, b) => b[0] - a[0]);
+    return whimsicalSize(candidates[0]?.[1] ?? nums[0]);
+}
+function whimsicalWeighted(nums) {
+    const sizes = nums.map(whimsicalSize);
+    let streak = 1;
+    for (let i = 1; i < Math.min(8, sizes.length); i++) {
+        if (sizes[i] === sizes[0]) streak++;
+        else break;
+    }
+    const bigCount = sizes.slice(0, 10).filter(x => x === 'BIG').length;
+    const smallCount = 10 - bigCount;
+    const alternation = sizes.length < 2 ? 0 : sizes.slice(0, 12).reduce((v, x, i, a) => i && x !== a[i - 1] ? v + 1 : v, 0) / (Math.min(12, sizes.length) - 1 || 1);
+    let big = 0.5, small = 0.5;
+    const add = (side, amount) => { if (side === 'BIG') big += amount; else small += amount; };
+    const sub = (side, amount) => { if (side === 'BIG') big -= amount; else small -= amount; };
+    if (streak >= 4) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .32); sub(sizes[0], .32); }
+    else if (streak >= 3) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .22); sub(sizes[0], .22); }
+    else if (streak >= 2) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .1); sub(sizes[0], .1); }
+    if (bigCount >= 8) { add('SMALL', .26); sub('BIG', .26); }
+    else if (bigCount >= 7) { add('SMALL', .18); sub('BIG', .18); }
+    else if (bigCount >= 6) { add('SMALL', .08); sub('BIG', .08); }
+    if (smallCount >= 8) { add('BIG', .26); sub('SMALL', .26); }
+    else if (smallCount >= 7) { add('BIG', .18); sub('SMALL', .18); }
+    else if (smallCount >= 6) { add('BIG', .08); sub('SMALL', .08); }
+    if (alternation > .72) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .2); sub(sizes[0], .2); }
+    else if (alternation < .28) { add(sizes[0], .12); sub(sizes[0] === 'BIG' ? 'SMALL' : 'BIG', .12); }
+    return big >= small ? 'BIG' : 'SMALL';
+}
+function whimsicalContext(nums) {
+    const sizes = nums.map(whimsicalSize);
+    let streak = 1;
+    for (let i = 1; i < Math.min(8, sizes.length); i++) { if (sizes[i] === sizes[0]) streak++; else break; }
+    const bigCount = sizes.slice(0, 10).filter(x => x === 'BIG').length;
+    const alternation = sizes.length < 2 ? 0 : sizes.slice(0, 12).reduce((v, x, i, a) => i && x !== a[i - 1] ? v + 1 : v, 0) / (Math.min(12, sizes.length) - 1 || 1);
+    const out = {};
+    out.STREAK = streak >= 2 ? (sizes[0] === 'BIG' ? 'SMALL' : 'BIG') : sizes[0];
+    out.BALANCE = Math.abs(bigCount - (10 - bigCount)) >= 2 ? (bigCount > 10 - bigCount ? 'SMALL' : 'BIG') : sizes[0];
+    out.ALTERNATION = alternation > .72 ? (sizes[0] === 'BIG' ? 'SMALL' : 'BIG') : alternation < .28 ? sizes[0] : (bigCount >= 10 - bigCount ? 'BIG' : 'SMALL');
+    out.TRANSITION = whimsicalTransition(nums);
+    const key = nums.slice(0, 3).join(',');
+    let found = null;
+    for (let i = 3; i < nums.length - 3; i++) if (nums.slice(i, i + 3).join(',') === key) { found = nums[i - 1]; break; }
+    out.REPEAT = found === null ? sizes[0] : whimsicalSize(found);
+    out.GAP = whimsicalGap(nums);
+    out.WEIGHTED = whimsicalWeighted(nums);
+    return out;
+}
+function calculatePastedModePrediction(list, state = {}) {
     if (!Array.isArray(list) || !list[0]) return null;
-    const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
-    const currentResult = getResultNumber(list[0]);
-    if (!/^\d+$/.test(currentPeriod) || currentResult === null || currentResult === 0) return null;
-
-    let nextPeriod;
-    try { nextPeriod = (BigInt(currentPeriod) + 1n).toString(); } catch (_) { return null; }
-    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
-    const answer = nextLast3Num * Math.exp(currentResult);
-    const digits = String(answer).replace('.', '').substring(0, 14);
-    const lastDigit = Number.parseInt(digits.charAt(digits.length - 1), 10);
-    if (!Number.isInteger(lastDigit)) return null;
-
-    if (state.mode === 'RECOVERY') {
-        const color = getActualColorBase(lastDigit);
+    const nums = list.slice(0, 100).map(item => Number(item?.number)).filter(n => Number.isInteger(n) && n >= 0 && n <= 9);
+    if (!nums.length) return null;
+    const period = String(list[0].issueNumber ?? list[0].issue ?? '');
+    if (!/^\d+$/.test(period)) return null;
+    const nextPeriod = (() => { try { return (BigInt(period) + 1n).toString(); } catch (_) { return null; } })();
+    if (!nextPeriod) return null;
+    const context = whimsicalContext(nums);
+    const pattern = nums.slice(0, 3).map(whimsicalSize).map(x => x[0]).join('');
+    const active = WHIMSICAL_MODES.filter(mode => WHIMSICAL_MAP[mode] === pattern);
+    const votes = active.map(mode => context[mode]);
+    const bigVotes = votes.filter(value => value === 'BIG').length;
+    const smallVotes = votes.length - bigVotes;
+    if (!active.length || bigVotes === smallVotes) {
         return {
-            type: 'COLOR', val: color, conf: 90, pat: 'COLOUR', mode: 'COLOUR',
-            pattern: `CALC-${lastDigit}`, lastDigit,
-            decisionReason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit} | RECOVERY COLOUR`,
-            bets: [{ type: 'COLOR', val: color, kind: 'color' }]
+            skip: true,
+            source: 'WHIMSICAL_HTML',
+            period: nextPeriod,
+            reason: active.length ? `WAIT: tie ${bigVotes}-${smallVotes} for pattern ${pattern}` : `WAIT: no best-pattern mode match for ${pattern}`
         };
     }
-
-    const size = lastDigit >= 5 ? 'BIG' : 'SMALL';
+    const pick = bigVotes > smallVotes ? 'BIG' : 'SMALL';
     return {
-        type: 'SIZE', val: size, conf: 90, pat: 'SIZE', mode: 'SIZE',
-        pattern: `CALC-${lastDigit}`, lastDigit,
-        decisionReason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit} | NORMAL SIZE`,
-        bets: [{ type: 'SIZE', val: size, kind: 'size' }]
+        skip: false,
+        source: 'WHIMSICAL_HTML',
+        externalPatternSignal: true,
+        type: 'SIZE',
+        val: pick,
+        mode: 'BIG/SMALL',
+        pat: 'FULL-HISTORY-BEST-PATTERNS',
+        pattern,
+        period: nextPeriod,
+        activeModes: active,
+        bigVotes,
+        smallVotes,
+        conf: Math.round(Math.max(bigVotes, smallVotes) / active.length * 100),
+        decisionReason: `${active.length} mode(s) matched ${pattern}; BIG ${bigVotes}, SMALL ${smallVotes}`,
+        bets: [{ type: 'SIZE', val: pick, kind: 'size' }]
     };
 }
-
-function classifyPatternFamily(pattern) {
-    const raw = String(pattern || '').toUpperCase();
-    const values = raw.replace(/R/g, 'B').replace(/G/g, 'S').split('');
-    if (values.length !== 6 || values.some(value => value !== 'B' && value !== 'S')) return 'OTHER';
-    const b = values.filter(value => value === 'B').length;
-    const s = values.length - b;
-    if (b === 4 && s === 2) return '4B2S';
-    if (b === 2 && s === 4) return '4S2B';
-    if (b === 3 && s === 3) return values[0] === 'B' ? '3B3S' : '3S3B';
-    return 'OTHER';
-}
-
 function inspectFiveSameRule(history) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
     if (rows.length < 6) return { ready: false, sizeFive: false, colorFive: false, issue: '' };
@@ -3245,145 +3347,60 @@ function inspectFiveSameRule(history) {
     };
 }
 
-async function decidePrediction(list, currentLevel, userId) {
-    if (!Array.isArray(list) || list.length < 1) return null;
-    initState(userId);
-    const cfgMode = String(autobetCfg[userId]?.mode || 'SIZE').toUpperCase();
-    if (cfgMode === 'COMBINED') return { skip: true, reason: 'Combined mode uses its live source predictor' };
-    const state = userStates[userId];
-    if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
+function calculateFormulaColorPrediction(list, state = {}) {
+    if (!Array.isArray(list) || list.length < 2 || !list[0]) return null;
 
-    const luciferHistory = await fetchLuciferFullHistory();
-    const analysisHistory = luciferHistory.length >= 6 ? luciferHistory : list;
-    const fiveRule = inspectFiveSameRule(analysisHistory);
-    const sizePattern = fiveRule.sizePattern || '';
-    const colorPattern = fiveRule.colorPattern || '';
-    const sizeSpecial = fiveRule.ready && isSpecialSixPattern(sizePattern);
-    const colorSpecial = fiveRule.ready && isSpecialSixPattern(colorPattern);
-    const bothSpecial = sizeSpecial && colorSpecial;
-    // After a WIN, if the same channel pattern appears again, switch to the
-    // opposite channel before generating the next signal.
-    const winPatternChannel = state.lastWinChannel === 'COLOR' ? 'COLOR' : state.lastWinChannel === 'SIZE' ? 'SIZE' : null;
-    const winPattern = String(state.lastWinPattern || '');
-    const winPatternFamily = state.lastWinPatternFamily || classifyPatternFamily(winPattern);
-    const currentPatternFamily = winPatternChannel === 'COLOR'
-        ? classifyPatternFamily(colorPattern)
-        : classifyPatternFamily(sizePattern);
-    const repeatedWinPattern = Boolean(winPatternChannel && winPatternFamily !== 'OTHER' && currentPatternFamily === winPatternFamily);
-    if (repeatedWinPattern) {
-        const forcedChannel = winPatternChannel === 'SIZE' ? 'COLOR' : 'SIZE';
-        const issueKey = `${fiveRule.issue}:${winPatternChannel}:${winPatternFamily}`;
-        if (state.lastSamePatternSwitchIssue !== issueKey) {
-            state.activeSixChannel = forcedChannel;
-            state.channelLosses[forcedChannel] = 0;
-            state.lastSamePatternSwitchIssue = issueKey;
-            clearLockedSixPrediction(userId);
-            console.warn(`[REPEAT-WIN-PATTERN] ${userId}: ${winPatternChannel} family ${winPatternFamily} repeated; switching to ${forcedChannel}`);
-        }
-    } else if (state.lastSamePatternSwitchIssue && fiveRule.issue !== String(state.lastSamePatternSwitchIssue).split(':')[0]) {
-        state.lastSamePatternSwitchIssue = null;
-    }
-    if (bothSpecial) {
-        if (!state.specialPatternSkipActive) {
-            state.skipPeriodsRemaining = 5;
-            state.specialPatternSkipActive = true;
-            clearLockedSixPrediction(userId);
-            console.warn(`[SPECIAL-PATTERN] ${userId}: SIZE=${sizePattern} COLOR=${colorPattern}; skipping 5 periods`);
-        }
-        if (Number(state.skipPeriodsRemaining) > 0) {
-            state.skipPeriodsRemaining--;
-            return {
-                skip: true,
-                reason: `Special pattern in both SIZE and COLOR (${sizePattern}/${colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
-                pattern: sizePattern,
-                colorPattern,
-                specialPatternSkip: true
-            };
-        }
-    } else {
-        state.specialPatternSkipActive = false;
-    }
-    if (sizeSpecial !== colorSpecial) {
-        const forcedChannel = sizeSpecial ? 'COLOR' : 'SIZE';
-        const lockedChannel = state.sixPredictionLock?.channel || null;
-        if (state.activeSixChannel !== forcedChannel || lockedChannel !== forcedChannel) {
-            state.activeSixChannel = forcedChannel;
-            state.channelLosses[forcedChannel] = 0;
-            clearLockedSixPrediction(userId);
-            console.warn(`[SPECIAL-PATTERN] ${userId}: ${sizeSpecial ? sizePattern : colorPattern}; switching to ${forcedChannel}`);
-        }
-    }
-    if (fiveRule.ready) {
-        const bothFive = fiveRule.sizeFive && fiveRule.colorFive;
-        if (bothFive) {
-            // One five-period pause per continuous both-five event.
-            if (!state.fiveSameSkipActive) {
-                state.skipPeriodsRemaining = 5;
-                state.fiveSameSkipActive = true;
-                state.lastFiveSameIssue = fiveRule.issue;
-                clearLockedSixPrediction(userId);
-                console.warn(`[FIVE-SAME] ${userId}: SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}; skipping 5 periods`);
-            }
-            if (Number(state.skipPeriodsRemaining) > 0) {
-                state.skipPeriodsRemaining--;
-                return {
-                    skip: true,
-                    reason: `SIZE and COLOR both have 5 same in latest 6 (${fiveRule.sizePattern}/${fiveRule.colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
-                    pattern: fiveRule.sizePattern,
-                    colorPattern: fiveRule.colorPattern,
-                    fiveSameSkip: true
-                };
-            }
-        } else {
-            // Re-arm only after the both-five condition has cleared.
-            state.fiveSameSkipActive = false;
-            state.skipPeriodsRemaining = 0;
-            if (fiveRule.sizeFive || fiveRule.colorFive) {
-            const forcedChannel = fiveRule.sizeFive ? 'COLOR' : 'SIZE';
-            const lockedChannel = state.sixPredictionLock?.channel || null;
-            if (state.activeSixChannel !== forcedChannel || lockedChannel !== forcedChannel) {
-                state.activeSixChannel = forcedChannel;
-                state.channelLosses[forcedChannel] = 0;
-                clearLockedSixPrediction(userId);
-                console.warn(`[FIVE-SAME] ${userId}: switching to ${forcedChannel}; SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}`);
-            }
-        }
-        }
-    }
+    const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
+    const currentResult = Number.parseInt(list[0].number ?? list[0].winNumber ?? '', 10);
+    if (!/^\d+$/.test(currentPeriod) || !Number.isInteger(currentResult) || currentResult < 0 || currentResult > 9) return null;
 
-    const locked = getLockedSixPrediction(userId);
-    if (locked) {
-        return {
-            type: locked.type, val: locked.val, conf: 50, historyBased: true,
-            channel: locked.channel, pat: locked.rule || 'LOCKED-UNTIL-WIN',
-            mode: `${locked.channel || locked.type} LOCKED UNTIL WIN`,
-            pattern: locked.pattern, colorPattern: locked.colorPattern,
-            decisionReason: `Locked ${locked.channel || locked.type} prediction; repeat ${locked.val} until WIN (losses=${locked.losses || 0})`,
-            bets: [{ type: locked.type, val: locked.val, kind: locked.type === 'COLOR' ? 'color' : 'size' }]
-        };
-    }
+    let nextPeriod;
+    try { nextPeriod = (BigInt(currentPeriod) + 1n).toString(); }
+    catch (_) { return null; }
 
-    let channel = state.activeSixChannel === 'COLOR' ? 'COLOR' : state.activeSixChannel === 'SIZE' ? 'SIZE' : null;
-    let signal;
+    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
+    if (!Number.isFinite(nextLast3Num)) return null;
 
-    if (channel) {
-        signal = buildSixChannelSignal(analysisHistory, channel);
-        if (signal.skip) return signal;
-    } else {
-        const selected = chooseSixChannel(analysisHistory, analysisHistory);
-        signal = selected.signal;
-        if (signal.skip) return signal;
-        channel = signal.channel;
-        state.activeSixChannel = channel;
-    }
+    // User formula: NEXT_LAST_3 × exp(CURRENT_RESULT), remove the decimal,
+    // take the first 14 characters, then use the final character as the digit.
+    const answer = nextLast3Num * Math.exp(currentResult);
+    const answerStr = String(answer);
+    const noDecimal = answerStr.replace('.', '');
+    const first14 = noDecimal.substring(0, 14);
+    const lastDigit = Number.parseInt(first14.charAt(first14.length - 1), 10);
+    if (!Number.isInteger(lastDigit) || lastDigit < 0 || lastDigit > 9) return null;
 
-    signal.channelLosses = Number(state.channelLosses[channel] || 0);
-    signal.decisionReason += ` | ${channel} loss streak ${signal.channelLosses}/5`;
-    const sourceIssue = analysisHistory[0]?.issueNumber || list[0]?.issueNumber;
-    setLockedSixPrediction(userId, signal, sourceIssue);
-    return signal;
+    // 0,2,4,6,8 = RED; 1,3,5,7,9 = GREEN.
+    // NORMAL mode only: never flip the formula output into RECOVERY.
+    const prediction = lastDigit % 2 === 0 ? 'RED' : 'GREEN';
+
+    return {
+        type: 'COLOR',
+        val: prediction,
+        mode: 'NORMAL',
+        pat: 'FORMULA-COLOR',
+        source: 'FORMULA_LAST_DIGIT_COLOR',
+        conf: 90,
+        currentPeriod,
+        currentResult,
+        nextPeriod,
+        calculatedAnswer: answer,
+        lastDigit,
+        colorRule: 'EVEN=RED, ODD=GREEN',
+        bets: [{ type: 'COLOR', val: prediction, kind: 'color' }]
+    };
 }
 
+function decidePrediction(list, currentLevel, userId) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    initState(userId);
+    const state = userStates[userId];
+    state.mode = 'NORMAL';
+    state.pastedMode = false;
+    state.nextPredictionMode = 'COLOR';
+    state.activeSixChannel = 'COLOR';
+    return calculateFormulaColorPrediction(list, state);
+}
 function recordLossStreakHit(userId) {
     const st = autobetState[userId];
     const cfg = autobetCfg[userId] || {};
@@ -3397,28 +3414,6 @@ function recordLossStreakHit(userId) {
 
 function getModeFromHistory(state) {
     return state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
-}
-
-function getBetGate(userId) {
-    initState(userId);
-    const gate = userStates[userId].betGate;
-    return gate === 'WATCH' ? 'WATCH' : 'ARMED';
-}
-
-function updateBetGateAfterResult(userId, wasWin, predictionEvaluated = true) {
-    if (!predictionEvaluated) return;
-    initState(userId);
-    const state = userStates[userId];
-    if (wasWin) {
-        // A WATCH win unlocks the NEXT period; the current WATCH period never bets.
-        state.betGate = 'ARMED';
-        state.watchReason = null;
-        console.log(`[BET-GATE] ${userId}: WIN -> next period ARMED`);
-    } else {
-        state.betGate = 'WATCH';
-        state.watchReason = 'LOSS: waiting for a WIN; next period is WATCH';
-        console.log(`[BET-GATE] ${userId}: LOSS -> next period WATCH`);
-    }
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced) {
@@ -3437,7 +3432,6 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     if (wasWin) {
         const winningLock = state.sixPredictionLock;
         state.lastWinPattern = winningLock?.pattern || null;
-        state.lastWinPatternFamily = classifyPatternFamily(state.lastWinPattern);
         state.lastWinChannel = winningLock?.channel || activeChannel;
         state.lastSamePatternSwitchIssue = null;
         state.channelLosses[activeChannel] = 0;
@@ -3461,23 +3455,41 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[RESULT] ${wasWin ? 'WIN' : 'LOSS'} recorded; next mode will be selected from current-period history`);
 
-    // Only a WIN from a real placed bet resets the martingale level. A
-    // WATCH-only WIN unlocks the next period but preserves the level reached
-    // before WATCH, so the resumed bet continues at that same level.
+    // Betting state machine:
+    //   1) First eligible period places a live bet.
+    //   2) Live WIN: reset to L1 and bet the very next period.
+    //   3) Live LOSS: advance exactly one level, then WATCH only.
+    //   4) WATCH LOSS: keep watching; never advance the level.
+    //   5) WATCH WIN: unlock betting; the next period places the stored level.
     const st = autobetState[userId];
-    if (wasWin && st && betPlaced) {
-        st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
-        st.inMart = false; st.consecutiveLoss = 0;
-        st.lossStreakHitRecorded = false;
-    } else if (!wasWin && st && betPlaced) {
-        st.consecutiveLoss++;
-        const cfg = autobetCfg[userId] || {};
-        const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
-        const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
-        st.level = level >= maxLevel ? 1 : level + 1;
-        st.sizeLevel = st.level; st.numberLevel = st.level;
-        st.inMart = st.level > 1;
-        recordLossStreakHit(userId);
+    const cfg = autobetCfg[userId] || {};
+    if (st && cfg.enabled) {
+        if (betPlaced) {
+            if (wasWin) {
+                state.mode = 'NORMAL';
+                st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
+                st.inMart = false; st.consecutiveLoss = 0;
+                st.lossStreakHitRecorded = false;
+                st.waitingForWatchWin = false;
+                st.lastOutcome = "WIN";
+            } else {
+                state.mode = 'NORMAL';
+                st.consecutiveLoss++;
+                const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
+                const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
+                st.level = level >= maxLevel ? 1 : level + 1;
+                st.sizeLevel = st.level; st.numberLevel = st.level;
+                st.inMart = st.level > 1;
+                st.waitingForWatchWin = true;
+                st.lastOutcome = "LOSS";
+                recordLossStreakHit(userId);
+            }
+        } else if (st.waitingForWatchWin) {
+            // A watch result never changes the martingale level. Formula mode remains NORMAL.
+            state.mode = 'NORMAL';
+            st.waitingForWatchWin = !wasWin;
+            st.lastOutcome = wasWin ? "WATCH_WIN" : "WATCH_LOSS";
+        }
     }
 }
 
@@ -3608,6 +3620,15 @@ async function runPredict(userId, chatId) {
     const st = autobetState[userId];
     const cfg = autobetCfg[userId];
 
+    // The result checker owns the current target period. Keep a short
+    // heartbeat alive, but never start a second prediction while settlement
+    // is still polling. This prevents the one-prediction-then-stop race.
+    if (resultCheckInFlight.has(runKey)) {
+        scheduleRun(userId, chatId, 5000);
+        runInFlight.delete(runKey);
+        return;
+    }
+
     if (st.isWaiting) {
         if (Date.now() >= st.nextStartTime) {
             st.isWaiting = false;
@@ -3628,7 +3649,7 @@ async function runPredict(userId, chatId) {
         return;
     }
 
-    // The latest draw result is the only input to the fixed local mapping.
+    // The uploaded HTML's API is authoritative for both current history and next period.
     const next = getNextIssue(list);
     if (!next) {
         await send(chatId, "SKIP");
@@ -3644,6 +3665,9 @@ async function runPredict(userId, chatId) {
     }
     sentPeriods[userId].add(next);
     dispatched.add(String(next));
+    while (dispatched.size > MAX_SENT_PERIODS) {
+        dispatched.delete(dispatched.values().next().value);
+    }
     predictionDispatches.set(runKey, dispatched);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
         sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
@@ -3683,7 +3707,7 @@ async function runPredict(userId, chatId) {
     const signalConfidence = Number(signal.conf ?? 90);
     const minimumConfidence = 90;
     const isSixPatternSignal = signal.historyBased === true;
-    if (!signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
+    if (!signal.externalPatternSignal && !signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
         const reason = `Confidence ${Number.isFinite(signalConfidence) ? signalConfidence : 0}% < required ${minimumConfidence}%`;
         console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
         await send(chatId,
@@ -3696,10 +3720,9 @@ async function runPredict(userId, chatId) {
         return;
     }
 
-    // Mode is chosen by this period's strongest history signal, not by the
-    // previous period's WIN or LOSS.
-    state.mode = signal.type === 'COLOR' ? 'RECOVERY' : 'NORMAL';
-    state.nextPredictionMode = signal.type === 'COLOR' ? 'COLOUR' : 'SIZE';
+    // Formula COLOR prediction always runs in NORMAL mode.
+    state.mode = 'NORMAL';
+    state.nextPredictionMode = 'COLOR';
 
     let abLine = signal.fallback
         ? "🤖 AutoBet: OFF (RANDOM FALLBACK)"
@@ -3712,13 +3735,17 @@ async function runPredict(userId, chatId) {
             : "🤖 AutoBet: OFF";
         canBet = false;
     } else if (!signal.fallback) {
-        const gate = getBetGate(userId);
-        canBet = gate === 'ARMED';
-        const sequence = cfg.mode === "NUMBER" ? cfg.customNumberBets : cfg.customBets;
-        const curBet = sequence[st.level - 1] ?? (cfg.baseBet * (MULT[st.level - 1] || 1));
-        abLine = canBet
-            ? (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet
-            : "👀 WATCH: waiting for WIN (next period can bet)";
+        // After every live-bet loss, prediction continues but staking pauses.
+        // A watch WIN unlocks the next period; watch losses keep the pause.
+        if (st.waitingForWatchWin) {
+            canBet = false;
+            abLine = "👀 WATCH MODE: waiting for WIN → next bet L" + st.level;
+        } else {
+            canBet = true;
+            const sequence = cfg.mode === "NUMBER" ? cfg.customNumberBets : cfg.customBets;
+            const curBet = sequence[st.level - 1] ?? (cfg.baseBet * (MULT[st.level - 1] || 1));
+            abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
+        }
     } else {
         canBet = false;
     }
@@ -3732,14 +3759,14 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : Six-result opposite pattern\n"+
+"║ 🎮 Mode  : NORMAL COLOR\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
 "║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"% | Hist "+String(signal.historicalWinRate ?? "-")+"%\n"+
 "║ "+(signal.type === "COLOR" ? "Color   : " : "Size    : ")+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-"║ Source  : Netlify size + Lucifer history\n"+
+"║ Source  : WinGo_30S + NEXT_LAST_3 × exp(CURRENT_RESULT)\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
@@ -3791,6 +3818,10 @@ waitLine+"\n"+
             ? rawPredictedBets.filter(spec => spec.type === "NUMBER")
             : rawPredictedBets.filter(spec => spec.type === "SIZE" || spec.type === "COLOR");
     checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
+    // Heartbeat fallback: checkResult normally schedules after settlement;
+    // this timer guarantees recovery if a network/API edge case leaves it
+    // waiting. The guard above prevents overlapping bets.
+    scheduleRun(userId, chatId, 7000);
     runInFlight.delete(runKey);
 }
 
@@ -3863,8 +3894,12 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         // The result endpoint can be read more than once while timers overlap.
         // Mark this period before sending any notification.
         const settled = settledPeriods.get(timerKey) || new Set();
-        if (settled.has(String(target))) return;
+        if (settled.has(String(target))) {
+            scheduleRun(userId, chatId, 5000);
+            return;
+        }
         settled.add(String(target));
+        while (settled.size > MAX_SENT_PERIODS) settled.delete(settled.values().next().value);
         settledPeriods.set(timerKey, settled);
 
         const actualSize = num >= 5 ? "BIG" : "SMALL";
@@ -3948,7 +3983,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                 `║ Result : ${actualSize}\n` +
                 `║ Colour : ${actualColorLabel}\n` +
                 `║ Status : ${win ? 'Correct Prediction' : 'Incorrect Prediction'}\n` +
-                `║ Next   : ${userStates[userId]?.nextPredictionMode || (win ? userStates[userId]?.mode : 'RECOVERY')}\n` +
+                `║ Next   : ${userStates[userId]?.nextPredictionMode || 'NORMAL'}\n` +
                 "╚══════════════════════════╝"
             );
         }
@@ -3963,11 +3998,11 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             while (keys.length > MAX_LEVEL_HISTORY) delete st.levelHistory[keys.shift()];
         }
 
-        if (combinedResult) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
+        // Combined settlement updates its two live legs only when a real pair
+        // was placed. A watch result must go through the common watch state
+        // machine so a watch WIN unlocks the next period.
+        if (combinedResult && betPlaced) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
         else updateAfterResult(userId, win, actualSize, betPlaced);
-        // Bet gate is independent of whether this period had a stake: a WATCH
-        // result is used to unlock the following period only after a WIN.
-        updateBetGateAfterResult(userId, win, Array.isArray(evaluationBets) && evaluationBets.length > 0);
 
         const s = stats[userId];
         if (betPlaced) {
@@ -4031,7 +4066,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             callbackBusy = false;
         }
     };
-    iv = setTimeout(tick, 10000);
+    iv = setTimeout(tick, 7000);
     resultCheckTimers.set(timerKey, iv);
 }
 
@@ -4131,6 +4166,7 @@ async function autobetStatus(chatId, userId) {
     (cfg.mode === "COMBINED" ? "Size Bets: ₹"+cfg.customSizeBets.join(" → ₹")+"\nNum Bets : ₹"+cfg.customNumberBets.join(" → ₹")+"\nRule     : 1 site size + 1 site number\n" : "Bet Seq  : ₹"+cfg.customBets.join(" → ₹")+"\n")+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
 "WatchLoss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+
+"Bet Flow : "+(st.waitingForWatchWin ? "WATCH — next WIN unlocks L"+st.level : "BET NEXT PERIOD")+"\n"+
 "Base Bet : ₹"+cfg.baseBet+"\n"+
 "Max Level: "+cfg.maxLvl+"\n"+
 "Target Profit: ₹"+cfg.targetProfit+"\n"+
@@ -4168,7 +4204,8 @@ const autobetMenu={keyboard:[
     ["💹 Set Profit Switch"],
     ["⏳ Set Section Delay","🔢 Set Watch Losses"],
     ["📊 AutoBet Status","🔀 Customize Bet"],
-    ["🎮 Mode: Big/Small","🔢 Mode: Number"],
+    ["🎮 Mode: Big/Small","🎨 Mode: Color"],
+    ["🔢 Mode: Number"],
     ["🔀 Mode: BigSmall+Number","🔙 Back"]
 ],resize_keyboard:true};
 
@@ -4608,7 +4645,12 @@ formatMartingale(cfg)+"\n\n"+
         if(text==="🎮 Mode: Big/Small"){
             delete userAction[id];
             autobetCfg[id].mode="SIZE";
-            return send(id,"✅ Mode set: BIG/SMALL\nCategory bet enabled.",{reply_markup:autobetMenu});
+            return send(id,"✅ Mode set: BIG/SMALL\nLegacy size category bet enabled.",{reply_markup:autobetMenu});
+        }
+        if(text==="🎨 Mode: Color"){
+            delete userAction[id];
+            autobetCfg[id].mode="COLOR";
+            return send(id,"✅ Mode set: COLOR (NORMAL ONLY)\nFormula last digit: even=RED, odd=GREEN. Recovery flip is OFF.",{reply_markup:autobetMenu});
         }
         if(text==="🔢 Mode: Number"){
             delete userAction[id];
@@ -4636,7 +4678,7 @@ formatMartingale(cfg)+"\n\n"+
                 return send(id,"Enter BIG/SMALL level amounts (example: 1,2,4,8):");
             }
             userAction[id]={action:"setsinglecustom",mode:autobetCfg[id].mode};
-            return send(id, autobetCfg[id].mode === "NUMBER" ? "Enter NUMBER bet level amounts (example: 1,9,81,729):" : "Enter BIG/SMALL bet level amounts (example: 1,2,4,8):");
+            return send(id, autobetCfg[id].mode === "NUMBER" ? "Enter NUMBER bet level amounts (example: 1,9,81,729):" : autobetCfg[id].mode === "COLOR" ? "Enter COLOR bet level amounts (example: 1,2,4,8):" : "Enter BIG/SMALL bet level amounts (example: 1,2,4,8):");
         }
 if(text==="🔢 Set Watch Losses"){
     userAction[id]={action:"setwloss"};
@@ -4775,7 +4817,7 @@ if(text==="🔢 Set Watch Losses"){
             running[id]=true;sentPeriods[id]=new Set();
             predictionDispatches.set(String(id), new Set());
             settledPeriods.delete(String(id));
-            autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
+            autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null,waitingForWatchWin:false,lastOutcome:null};
 
             // Load previous B/S history from API
             const prevList = await fetchList();
