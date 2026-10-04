@@ -3347,7 +3347,7 @@ function inspectFiveSameRule(history) {
     };
 }
 
-function calculateFormulaColorPrediction(list, state = {}) {
+function calculateFormulaChannelPrediction(list, state = {}) {
     if (!Array.isArray(list) || list.length < 2 || !list[0]) return null;
 
     const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
@@ -3360,26 +3360,37 @@ function calculateFormulaColorPrediction(list, state = {}) {
 
     const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
     if (!Number.isFinite(nextLast3Num)) return null;
-
-    // User formula: NEXT_LAST_3 × exp(CURRENT_RESULT), remove the decimal,
-    // take the first 14 characters, then use the final character as the digit.
     const answer = nextLast3Num * Math.exp(currentResult);
-    const answerStr = String(answer);
-    const noDecimal = answerStr.replace('.', '');
+    const noDecimal = String(answer).replace('.', '');
     const first14 = noDecimal.substring(0, 14);
     const lastDigit = Number.parseInt(first14.charAt(first14.length - 1), 10);
     if (!Number.isInteger(lastDigit) || lastDigit < 0 || lastDigit > 9) return null;
 
-    // 0,2,4,6,8 = RED; 1,3,5,7,9 = GREEN.
-    // NORMAL mode only: never flip the formula output into RECOVERY.
-    const prediction = lastDigit % 2 === 0 ? 'RED' : 'GREEN';
+    const channel = state.activeChannel === 'SIZE' ? 'SIZE' : 'COLOR';
+    const mode = state.mode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
+    let prediction;
+    let type;
+    if (channel === 'SIZE') {
+        prediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
+        type = 'SIZE';
+    } else {
+        prediction = lastDigit % 2 === 0 ? 'RED' : 'GREEN';
+        type = 'COLOR';
+    }
+    // Recovery uses the opposite output for the active channel.
+    if (mode === 'RECOVERY') {
+        prediction = channel === 'SIZE'
+            ? (prediction === 'SMALL' ? 'BIG' : 'SMALL')
+            : (prediction === 'RED' ? 'GREEN' : 'RED');
+    }
 
     return {
-        type: 'COLOR',
+        type,
         val: prediction,
-        mode: 'NORMAL',
-        pat: 'FORMULA-COLOR',
-        source: 'FORMULA_LAST_DIGIT_COLOR',
+        mode,
+        channel,
+        pat: `FORMULA-${channel}-${mode}`,
+        source: 'FORMULA_LAST_DIGIT_CHANNEL',
         conf: 90,
         currentPeriod,
         currentResult,
@@ -3387,19 +3398,31 @@ function calculateFormulaColorPrediction(list, state = {}) {
         calculatedAnswer: answer,
         lastDigit,
         colorRule: 'EVEN=RED, ODD=GREEN',
-        bets: [{ type: 'COLOR', val: prediction, kind: 'color' }]
+        sizeRule: '0-4=SMALL, 5-9=BIG',
+        bets: [{ type, val: prediction, kind: type === 'COLOR' ? 'color' : 'size' }]
     };
 }
 
+// Backward-compatible name for any internal callers.
+function calculateFormulaColorPrediction(list, state = {}) {
+    return calculateFormulaChannelPrediction(list, { ...state, activeChannel: 'COLOR' });
+}
 function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || list.length < 2) return null;
     initState(userId);
     const state = userStates[userId];
-    state.mode = 'NORMAL';
+    if (state.activeChannel !== 'SIZE' && state.activeChannel !== 'COLOR') state.activeChannel = 'COLOR';
+    if (state.mode !== 'RECOVERY') state.mode = 'NORMAL';
     state.pastedMode = false;
-    state.nextPredictionMode = 'COLOR';
-    state.activeSixChannel = 'COLOR';
-    return calculateFormulaColorPrediction(list, state);
+    state.nextPredictionMode = state.activeChannel;
+    state.activeSixChannel = state.activeChannel;
+    const signal = calculateFormulaChannelPrediction(list, state);
+    if (signal) {
+        state.lastPredictionChannel = signal.channel;
+        state.lastPredictionMode = signal.mode;
+        state.lastPredictionValue = signal.val;
+    }
+    return signal;
 }
 function recordLossStreakHit(userId) {
     const st = autobetState[userId];
@@ -3455,40 +3478,49 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[RESULT] ${wasWin ? 'WIN' : 'LOSS'} recorded; next mode will be selected from current-period history`);
 
-    // Betting state machine:
-    //   1) First eligible period places a live bet.
-    //   2) Live WIN: reset to L1 and bet the very next period.
-    //   3) Live LOSS: advance exactly one level, then WATCH only.
-    //   4) WATCH LOSS: keep watching; never advance the level.
-    //   5) WATCH WIN: unlock betting; the next period places the stored level.
+    // Channel state machine:
+    //   Start: COLOR NORMAL
+    //   COLOR NORMAL LOSS -> SIZE NORMAL
+    //   SIZE NORMAL LOSS -> SIZE RECOVERY
+    //   SIZE RECOVERY LOSS -> COLOR RECOVERY
+    //   COLOR RECOVERY LOSS -> COLOR NORMAL
+    //   Any RECOVERY WIN -> same channel NORMAL
+    //   NORMAL WIN -> remain on the same channel/mode.
     const st = autobetState[userId];
     const cfg = autobetCfg[userId] || {};
-    if (st && cfg.enabled) {
-        if (betPlaced) {
-            if (wasWin) {
-                state.mode = 'NORMAL';
-                st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
-                st.inMart = false; st.consecutiveLoss = 0;
-                st.lossStreakHitRecorded = false;
-                st.waitingForWatchWin = false;
-                st.lastOutcome = "WIN";
-            } else {
-                state.mode = 'NORMAL';
-                st.consecutiveLoss++;
-                const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
-                const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
-                st.level = level >= maxLevel ? 1 : level + 1;
-                st.sizeLevel = st.level; st.numberLevel = st.level;
-                st.inMart = st.level > 1;
-                st.waitingForWatchWin = true;
-                st.lastOutcome = "LOSS";
-                recordLossStreakHit(userId);
-            }
-        } else if (st.waitingForWatchWin) {
-            // A watch result never changes the martingale level. Formula mode remains NORMAL.
+    if (st && cfg.enabled && (cfg.mode === 'COLOR' || cfg.mode === 'SIZE')) {
+        const channelBefore = state.lastPredictionChannel === 'SIZE' ? 'SIZE' : 'COLOR';
+        const modeBefore = state.lastPredictionMode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
+        st.waitingForWatchWin = false;
+        if (wasWin) {
             state.mode = 'NORMAL';
-            st.waitingForWatchWin = !wasWin;
-            st.lastOutcome = wasWin ? "WATCH_WIN" : "WATCH_LOSS";
+            state.activeChannel = channelBefore;
+            st.lastOutcome = modeBefore === 'RECOVERY' ? 'RECOVERY_WIN' : 'WIN';
+            if (modeBefore === 'RECOVERY') {
+                st.level = 1;
+                st.sizeLevel = 1;
+                st.numberLevel = 1;
+                st.inMart = false;
+                st.consecutiveLoss = 0;
+            }
+        } else {
+            const next = (() => {
+                if (channelBefore === 'COLOR' && modeBefore === 'NORMAL') return { channel: 'SIZE', mode: 'NORMAL' };
+                if (channelBefore === 'SIZE' && modeBefore === 'NORMAL') return { channel: 'SIZE', mode: 'RECOVERY' };
+                if (channelBefore === 'SIZE' && modeBefore === 'RECOVERY') return { channel: 'COLOR', mode: 'RECOVERY' };
+                return { channel: 'COLOR', mode: 'NORMAL' };
+            })();
+            state.activeChannel = next.channel;
+            state.mode = next.mode;
+            st.lastOutcome = `${channelBefore}_${modeBefore}_LOSS_TO_${next.channel}_${next.mode}`;
+            const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
+            const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
+            st.level = level >= maxLevel ? 1 : level + 1;
+            st.sizeLevel = st.level;
+            st.numberLevel = st.level;
+            st.inMart = st.level > 1;
+            st.consecutiveLoss = Number(st.consecutiveLoss || 0) + 1;
+            recordLossStreakHit(userId);
         }
     }
 }
@@ -3720,9 +3752,9 @@ async function runPredict(userId, chatId) {
         return;
     }
 
-    // Formula COLOR prediction always runs in NORMAL mode.
-    state.mode = 'NORMAL';
-    state.nextPredictionMode = 'COLOR';
+    // COLOR/SIZE channel engine preserves its active NORMAL/RECOVERY state.
+    if ((cfg.mode === 'COLOR' || cfg.mode === 'SIZE') && state.mode !== 'RECOVERY') state.mode = 'NORMAL';
+    state.nextPredictionMode = state.activeChannel || 'COLOR';
 
     let abLine = signal.fallback
         ? "🤖 AutoBet: OFF (RANDOM FALLBACK)"
@@ -3737,7 +3769,7 @@ async function runPredict(userId, chatId) {
     } else if (!signal.fallback) {
         // After every live-bet loss, prediction continues but staking pauses.
         // A watch WIN unlocks the next period; watch losses keep the pause.
-        if (st.waitingForWatchWin) {
+        if (!['COLOR', 'SIZE'].includes(cfg.mode) && st.waitingForWatchWin) {
             canBet = false;
             abLine = "👀 WATCH MODE: waiting for WIN → next bet L" + st.level;
         } else {
@@ -3759,7 +3791,7 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : NORMAL COLOR\n"+
+"║ 🎮 Mode  : "+String(signal.channel || state.activeChannel || "COLOR")+" "+String(signal.mode || state.mode || "NORMAL")+"\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
@@ -4650,7 +4682,7 @@ formatMartingale(cfg)+"\n\n"+
         if(text==="🎨 Mode: Color"){
             delete userAction[id];
             autobetCfg[id].mode="COLOR";
-            return send(id,"✅ Mode set: COLOR (NORMAL ONLY)\nFormula last digit: even=RED, odd=GREEN. Recovery flip is OFF.",{reply_markup:autobetMenu});
+            return send(id,"✅ Mode set: COLOR\nCOLOR loss → SIZE NORMAL → SIZE RECOVERY → COLOR RECOVERY.",{reply_markup:autobetMenu});
         }
         if(text==="🔢 Mode: Number"){
             delete userAction[id];
