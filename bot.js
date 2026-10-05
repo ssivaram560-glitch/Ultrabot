@@ -2213,7 +2213,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 betMultiple: betMult,
                 // COLOR formula and NUMBER use the user's 30-second game;
                 // the legacy SIZE/COMBINED routes remain on WinGo_1M.
-                gameCode:    (cfg.mode === "NUMBER" || cfg.mode === "COLOR") ? "WinGo_30S" : "WinGo_1M",
+                gameCode:    (cfg.mode === "COMBINED" ? "WinGo_1M" : "WinGo_30S"),
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -3347,6 +3347,40 @@ function inspectFiveSameRule(history) {
     };
 }
 
+function calculateDifferenceSizePrediction(list, state = {}) {
+    if (!Array.isArray(list) || list.length < 2 || !list[0] || !list[1]) return null;
+    const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
+    const currentNumber = Number.parseInt(list[0].number ?? list[0].winNumber ?? '', 10);
+    const previousNumber = Number.parseInt(list[1].number ?? list[1].winNumber ?? '', 10);
+    if (!/^\d+$/.test(currentPeriod) || !Number.isInteger(currentNumber) || !Number.isInteger(previousNumber) || currentNumber < 0 || currentNumber > 9 || previousNumber < 0 || previousNumber > 9) return null;
+    let nextPeriod;
+    try { nextPeriod = (BigInt(currentPeriod) + 1n).toString(); } catch (_) { return null; }
+
+    // Compare period 000/current against period 001/previous:
+    // current < previous => SMALL; current > previous => BIG;
+    // equal numbers use the same number's own BIG/SMALL side.
+    const analysis = currentNumber < previousNumber ? 'SMALL'
+        : currentNumber > previousNumber ? 'BIG'
+        : currentNumber >= 5 ? 'BIG' : 'SMALL';
+    const mode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+    const prediction = mode === 'OPPOSITE' ? (analysis === 'BIG' ? 'SMALL' : 'BIG') : analysis;
+    return {
+        type: 'SIZE',
+        val: prediction,
+        mode,
+        pat: `TWO-RESULT-DIFFERENCE-${mode}`,
+        source: 'TWO_RESULT_COMPARISON',
+        conf: 90,
+        currentPeriod,
+        currentNumber,
+        previousNumber,
+        nextPeriod,
+        analysis,
+        comparison: currentNumber === previousNumber ? 'EQUAL' : currentNumber < previousNumber ? 'CURRENT_LT_PREVIOUS' : 'CURRENT_GT_PREVIOUS',
+        bets: [{ type: 'SIZE', val: prediction, kind: 'size' }]
+    };
+}
+
 function calculateFormulaChannelPrediction(list, state = {}) {
     if (!Array.isArray(list) || list.length < 2 || !list[0]) return null;
 
@@ -3411,9 +3445,23 @@ function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || list.length < 2) return null;
     initState(userId);
     const state = userStates[userId];
+    const cfg = autobetCfg[userId] || {};
+    state.pastedMode = false;
+    if (cfg.mode === 'SIZE') {
+        if (state.mode !== 'OPPOSITE') state.mode = 'NORMAL';
+        state.activeChannel = 'SIZE';
+        state.nextPredictionMode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        state.activeSixChannel = 'SIZE';
+        const signal = calculateDifferenceSizePrediction(list, state);
+        if (signal) {
+            state.lastPredictionChannel = 'SIZE';
+            state.lastPredictionMode = signal.mode;
+            state.lastPredictionValue = signal.val;
+        }
+        return signal;
+    }
     if (state.activeChannel !== 'SIZE' && state.activeChannel !== 'COLOR') state.activeChannel = 'COLOR';
     if (state.mode !== 'RECOVERY') state.mode = 'NORMAL';
-    state.pastedMode = false;
     state.nextPredictionMode = state.activeChannel;
     state.activeSixChannel = state.activeChannel;
     const signal = calculateFormulaChannelPrediction(list, state);
@@ -3488,39 +3536,55 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     //   NORMAL WIN -> remain on the same channel/mode.
     const st = autobetState[userId];
     const cfg = autobetCfg[userId] || {};
-    if (st && cfg.enabled && (cfg.mode === 'COLOR' || cfg.mode === 'SIZE')) {
+    if (st && cfg.enabled && cfg.mode === 'SIZE') {
+        // Big/Small mode: NORMAL is analysis; a NORMAL loss switches to
+        // OPPOSITE. An OPPOSITE win stays OPPOSITE; an OPPOSITE loss returns
+        // to the normal two-result analysis mode.
+        const modeBefore = state.lastPredictionMode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        state.activeChannel = 'SIZE';
+        st.waitingForWatchWin = false;
+        if (modeBefore === 'OPPOSITE') {
+            if (wasWin) {
+                state.mode = 'OPPOSITE';
+                st.lastOutcome = 'OPPOSITE_WIN_STAY_OPPOSITE';
+            } else {
+                state.mode = 'NORMAL';
+                st.lastOutcome = 'OPPOSITE_LOSS_TO_ANALYSIS';
+            }
+        } else if (wasWin) {
+            state.mode = 'NORMAL';
+            st.lastOutcome = 'ANALYSIS_WIN_STAY_ANALYSIS';
+        } else {
+            state.mode = 'OPPOSITE';
+            st.lastOutcome = 'ANALYSIS_LOSS_TO_OPPOSITE';
+        }
+        if (wasWin) {
+            st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
+            st.inMart = false; st.consecutiveLoss = 0;
+        } else {
+            const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
+            const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
+            st.level = level >= maxLevel ? 1 : level + 1;
+            st.sizeLevel = st.level; st.numberLevel = st.level;
+            st.inMart = st.level > 1;
+            st.consecutiveLoss = Number(st.consecutiveLoss || 0) + 1;
+            recordLossStreakHit(userId);
+        }
+    } else if (st && cfg.enabled && cfg.mode === 'COLOR') {
         const channelBefore = state.lastPredictionChannel === 'SIZE' ? 'SIZE' : 'COLOR';
         const modeBefore = state.lastPredictionMode === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
         st.waitingForWatchWin = false;
         if (wasWin) {
-            state.mode = 'NORMAL';
-            state.activeChannel = channelBefore;
+            state.mode = 'NORMAL'; state.activeChannel = channelBefore;
             st.lastOutcome = modeBefore === 'RECOVERY' ? 'RECOVERY_WIN' : 'WIN';
-            if (modeBefore === 'RECOVERY') {
-                st.level = 1;
-                st.sizeLevel = 1;
-                st.numberLevel = 1;
-                st.inMart = false;
-                st.consecutiveLoss = 0;
-            }
+            if (modeBefore === 'RECOVERY') { st.level = 1; st.sizeLevel = 1; st.numberLevel = 1; st.inMart = false; st.consecutiveLoss = 0; }
         } else {
-            const next = (() => {
-                if (channelBefore === 'COLOR' && modeBefore === 'NORMAL') return { channel: 'SIZE', mode: 'NORMAL' };
-                if (channelBefore === 'SIZE' && modeBefore === 'NORMAL') return { channel: 'SIZE', mode: 'RECOVERY' };
-                if (channelBefore === 'SIZE' && modeBefore === 'RECOVERY') return { channel: 'COLOR', mode: 'RECOVERY' };
-                return { channel: 'COLOR', mode: 'NORMAL' };
-            })();
-            state.activeChannel = next.channel;
-            state.mode = next.mode;
+            const next = channelBefore === 'COLOR' && modeBefore === 'NORMAL' ? {channel:'SIZE',mode:'NORMAL'} : channelBefore === 'SIZE' && modeBefore === 'NORMAL' ? {channel:'SIZE',mode:'RECOVERY'} : channelBefore === 'SIZE' ? {channel:'COLOR',mode:'RECOVERY'} : {channel:'COLOR',mode:'NORMAL'};
+            state.activeChannel = next.channel; state.mode = next.mode;
             st.lastOutcome = `${channelBefore}_${modeBefore}_LOSS_TO_${next.channel}_${next.mode}`;
             const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
             const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
-            st.level = level >= maxLevel ? 1 : level + 1;
-            st.sizeLevel = st.level;
-            st.numberLevel = st.level;
-            st.inMart = st.level > 1;
-            st.consecutiveLoss = Number(st.consecutiveLoss || 0) + 1;
-            recordLossStreakHit(userId);
+            st.level = level >= maxLevel ? 1 : level + 1; st.sizeLevel = st.level; st.numberLevel = st.level; st.inMart = st.level > 1; st.consecutiveLoss = Number(st.consecutiveLoss || 0) + 1; recordLossStreakHit(userId);
         }
     }
 }
@@ -3752,9 +3816,15 @@ async function runPredict(userId, chatId) {
         return;
     }
 
-    // COLOR/SIZE channel engine preserves its active NORMAL/RECOVERY state.
-    if ((cfg.mode === 'COLOR' || cfg.mode === 'SIZE') && state.mode !== 'RECOVERY') state.mode = 'NORMAL';
-    state.nextPredictionMode = state.activeChannel || 'COLOR';
+    // Preserve the active analysis/opposite state for SIZE and the channel
+    // state for COLOR.
+    if (cfg.mode === 'SIZE') {
+        if (state.mode !== 'OPPOSITE') state.mode = 'NORMAL';
+        state.nextPredictionMode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+    } else {
+        if (cfg.mode === 'COLOR' && state.mode !== 'RECOVERY') state.mode = 'NORMAL';
+        state.nextPredictionMode = state.activeChannel || 'COLOR';
+    }
 
     let abLine = signal.fallback
         ? "🤖 AutoBet: OFF (RANDOM FALLBACK)"
@@ -3791,14 +3861,14 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : "+String(signal.channel || state.activeChannel || "COLOR")+" "+String(signal.mode || state.mode || "NORMAL")+"\n"+
+"║ 🎮 Mode  : "+String(signal.mode || state.mode || "NORMAL")+" "+String(signal.type === "SIZE" ? "BIG/SMALL" : (signal.channel || state.activeChannel || "COLOR"))+"\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
 "║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"% | Hist "+String(signal.historicalWinRate ?? "-")+"%\n"+
 "║ "+(signal.type === "COLOR" ? "Color   : " : "Size    : ")+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-"║ Source  : WinGo_30S + NEXT_LAST_3 × exp(CURRENT_RESULT)\n"+
+"║ Source  : LAST 2 RESULTS COMPARISON\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
