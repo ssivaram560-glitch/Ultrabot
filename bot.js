@@ -1809,7 +1809,7 @@ function initUser(id) {
     for (const field of ["total", "win", "loss", "lossStreak", "winStreak", "maxWinStreak", "maxLossStreak"]) {
         if (!Number.isFinite(Number(stats[id][field])) || stats[id][field] < 0) stats[id][field] = 0;
     }
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null, sizePredictionMode:'ANALYSIS', sixPredictionLock:null, activeSixChannel:null, channelLosses:{ SIZE:0, COLOR:0 }, channelSwitches:0, skipPeriodsRemaining:0, lastFiveSameIssue:null, fiveSameSkipActive:false, specialPatternSkipActive:false, lastWinPattern:null, lastWinChannel:null, lastSamePatternSwitchIssue:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -3362,7 +3362,7 @@ function calculateDifferenceSizePrediction(list, state = {}) {
     const analysis = currentNumber < previousNumber ? 'SMALL'
         : currentNumber > previousNumber ? 'BIG'
         : currentNumber >= 5 ? 'BIG' : 'SMALL';
-    const mode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+    const mode = state.sizePredictionMode === 'OPPOSITE' || state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
     const prediction = mode === 'OPPOSITE' ? (analysis === 'BIG' ? 'SMALL' : 'BIG') : analysis;
     return {
         type: 'SIZE',
@@ -3446,16 +3446,19 @@ function decidePrediction(list, currentLevel, userId) {
     initState(userId);
     const state = userStates[userId];
     const cfg = autobetCfg[userId] || {};
+    if (cfg.mode === 'SIZE' && state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
     state.pastedMode = false;
     if (cfg.mode === 'SIZE') {
-        if (state.mode !== 'OPPOSITE') state.mode = 'NORMAL';
+        if (state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
+        state.mode = 'NORMAL';
         state.activeChannel = 'SIZE';
-        state.nextPredictionMode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        state.nextPredictionMode = state.sizePredictionMode;
         state.activeSixChannel = 'SIZE';
         const signal = calculateDifferenceSizePrediction(list, state);
         if (signal) {
             state.lastPredictionChannel = 'SIZE';
             state.lastPredictionMode = signal.mode;
+            state.sizePredictionMode = signal.mode;
             state.lastPredictionValue = signal.val;
         }
         return signal;
@@ -3540,22 +3543,26 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
         // Big/Small mode: NORMAL is analysis; a NORMAL loss switches to
         // OPPOSITE. An OPPOSITE win stays OPPOSITE; an OPPOSITE loss returns
         // to the normal two-result analysis mode.
-        const modeBefore = state.lastPredictionMode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        const modeBefore = state.lastPredictionMode === 'OPPOSITE' || state.sizePredictionMode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
         state.activeChannel = 'SIZE';
         st.waitingForWatchWin = false;
         if (modeBefore === 'OPPOSITE') {
             if (wasWin) {
-                state.mode = 'OPPOSITE';
+                state.mode = 'NORMAL';
+                state.sizePredictionMode = 'OPPOSITE';
                 st.lastOutcome = 'OPPOSITE_WIN_STAY_OPPOSITE';
             } else {
                 state.mode = 'NORMAL';
+                state.sizePredictionMode = 'ANALYSIS';
                 st.lastOutcome = 'OPPOSITE_LOSS_TO_ANALYSIS';
             }
         } else if (wasWin) {
             state.mode = 'NORMAL';
+            state.sizePredictionMode = 'ANALYSIS';
             st.lastOutcome = 'ANALYSIS_WIN_STAY_ANALYSIS';
         } else {
-            state.mode = 'OPPOSITE';
+            state.mode = 'NORMAL';
+            state.sizePredictionMode = 'OPPOSITE';
             st.lastOutcome = 'ANALYSIS_LOSS_TO_OPPOSITE';
         }
         if (wasWin) {
@@ -3819,8 +3826,9 @@ async function runPredict(userId, chatId) {
     // Preserve the active analysis/opposite state for SIZE and the channel
     // state for COLOR.
     if (cfg.mode === 'SIZE') {
-        if (state.mode !== 'OPPOSITE') state.mode = 'NORMAL';
-        state.nextPredictionMode = state.mode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        if (state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
+        state.mode = 'NORMAL';
+        state.nextPredictionMode = state.sizePredictionMode;
     } else {
         if (cfg.mode === 'COLOR' && state.mode !== 'RECOVERY') state.mode = 'NORMAL';
         state.nextPredictionMode = state.activeChannel || 'COLOR';
@@ -3861,7 +3869,7 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : "+String(signal.mode || state.mode || "NORMAL")+" "+String(signal.type === "SIZE" ? "BIG/SMALL" : (signal.channel || state.activeChannel || "COLOR"))+"\n"+
+"║ 🎮 Mode  : "+String(signal.mode || (signal.type === "SIZE" ? state.sizePredictionMode : state.mode) || "NORMAL")+" "+String(signal.type === "SIZE" ? "BIG/SMALL" : (signal.channel || state.activeChannel || "COLOR"))+"\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
