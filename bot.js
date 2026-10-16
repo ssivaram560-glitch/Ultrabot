@@ -6,6 +6,32 @@ const puppeteer   = require('puppeteer');
 const fs          = require('fs');
 const path        = require('path');
 const { PNG }      = require('pngjs');
+const DEATH_HISTORY_CACHE_FILE = path.join(__dirname, '.death_history_cache.json');
+function readDeathHistoryCache() {
+    try {
+        const rows = JSON.parse(fs.readFileSync(DEATH_HISTORY_CACHE_FILE, 'utf8'));
+        return Array.isArray(rows) ? rows : [];
+    } catch (_) { return []; }
+}
+function mergeDeathHistoryCache(rows) {
+    const merged = new Map();
+    for (const item of [...readDeathHistoryCache(), ...(Array.isArray(rows) ? rows : [])]) {
+        const issueNumber = String(item?.issueNumber ?? item?.issue ?? '');
+        const number = String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1);
+        if (!/^\d+$/.test(issueNumber) || !/^[0-9]$/.test(number)) continue;
+        merged.set(issueNumber, { ...item, issueNumber, number });
+    }
+    const ordered = [...merged.values()].sort((a, b) => {
+        try { return Number(BigInt(String(b.issueNumber)) - BigInt(String(a.issueNumber))); }
+        catch (_) { return String(b.issueNumber).localeCompare(String(a.issueNumber)); }
+    }).slice(0, 500);
+    try {
+        const tmp = DEATH_HISTORY_CACHE_FILE + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(ordered), 'utf8');
+        fs.renameSync(tmp, DEATH_HISTORY_CACHE_FILE);
+    } catch (error) { console.error('[DEATH CACHE WRITE ERROR]', error?.message || error); }
+    return ordered;
+}
 // ============================================================
 //  HELPER FUNCTIONS
 // ============================================================
@@ -1057,32 +1083,74 @@ async function fetchCombinedSourceList() {
 // Fetch only the bounded 100 rows required by 3.html. This is the sole
 // source for BIG/SMALL mode, including both the target period and settlement.
 async function fetchWhimsicalHistory() {
+    const now = Date.now();
+    // Avoid hammering the endpoint while the prediction/result timers overlap.
+    if (fetchWhimsicalHistory._cache && now - fetchWhimsicalHistory._cacheAt < 2500) {
+        return fetchWhimsicalHistory._cache.slice();
+    }
     try {
-        const response = await axios.get(WHIMSICAL_SOURCE_URL + '?pageSize=100&t=' + Date.now(), {
-            headers: {
-                'Accept': 'application/json',
-                'Cache-Control': 'no-cache, no-store, max-age=0',
-                'Pragma': 'no-cache',
-                'Origin': 'https://whimsical-buttercream-00c705.netlify.app',
-                'Referer': 'https://whimsical-buttercream-00c705.netlify.app/',
-                'User-Agent': 'Mozilla/5.0'
-            },
-            timeout: 10000,
-            maxContentLength: 512 * 1024,
-            maxBodyLength: 512 * 1024,
-            validateStatus: status => status >= 200 && status < 300
-        });
-        const raw = Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
-        return raw.slice(0, 100).map(item => ({
-            issueNumber: String(item?.issueNumber ?? item?.issue ?? ''),
-            number: String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1)
-        })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
+        const headers = {
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache, no-store, max-age=0',
+            'Pragma': 'no-cache',
+            'Origin': 'https://whimsical-buttercream-00c705.netlify.app',
+            'Referer': 'https://whimsical-buttercream-00c705.netlify.app/',
+            'User-Agent': 'Mozilla/5.0'
+        };
+        const all = [];
+        const seen = new Set();
+        // The endpoint ignores pageSize above 10 in practice. Fetch pages
+        // explicitly so Death Analysis always receives at least 50 rows.
+        for (let page = 1; page <= 10 && all.length < 100; page++) {
+            const response = await axios.get(
+                WHIMSICAL_SOURCE_URL + `?pageSize=10&pageNo=${page}&t=${Date.now()}`,
+                {
+                    headers,
+                    timeout: 10000,
+                    maxContentLength: 512 * 1024,
+                    maxBodyLength: 512 * 1024,
+                    validateStatus: status => status >= 200 && status < 300
+                }
+            );
+            const raw = Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+            if (!raw.length) break;
+            for (const item of raw) {
+                const issueNumber = String(item?.issueNumber ?? item?.issue ?? '');
+                const number = String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1);
+                if (!/^\d+$/.test(issueNumber) || !/^[0-9]$/.test(number) || seen.has(issueNumber)) continue;
+                seen.add(issueNumber);
+                all.push({
+                    issueNumber,
+                    number,
+                    color: String(item?.color ?? ''),
+                    size: String(item?.size ?? '')
+                });
+            }
+            if (raw.length < 10) break;
+        }
+        const merged = mergeDeathHistoryCache(all);
+        if (merged.length >= 50) {
+            fetchWhimsicalHistory._cache = merged;
+            fetchWhimsicalHistory._cacheAt = Date.now();
+            return merged.slice();
+        }
+        // A short response is not safe for Death Analysis; retain it on disk
+        // and collect more real periods on the next polling cycles.
+        if (fetchWhimsicalHistory._cache?.length >= 50) return fetchWhimsicalHistory._cache.slice();
+        console.error('[WHIMSICAL SOURCE ERROR] collected ' + merged.length + '/50 valid rows; prediction remains paused');
+        return merged;
     } catch (error) {
         console.error('[WHIMSICAL SOURCE ERROR] retryable:', error?.message || error);
-        return null;
+        const cached = mergeDeathHistoryCache([]);
+        if (cached.length >= 50) {
+            fetchWhimsicalHistory._cache = cached;
+            fetchWhimsicalHistory._cacheAt = Date.now();
+            return cached.slice();
+        }
+        if (fetchWhimsicalHistory._cache?.length >= 50) return fetchWhimsicalHistory._cache.slice();
+        return cached;
     }
 }
-
 async function fetchLuciferFullHistory() {
     try {
         const response = await axios.get(LUCIFER_FULL_HISTORY_URL + '?_=' + Date.now(), {
@@ -3859,6 +3927,9 @@ async function decidePrediction(list, currentLevel, userId) {
         state.nextPredictionMode = 'DEATH_ANALYSIS';
         const oldHistory = await fetchLuciferOldHistoryForAnalysis();
         const analysisHistory = oldHistory.length >= 50 ? oldHistory : list;
+        if (analysisHistory.length < 50) {
+            return { skip: true, reason: `Death Analysis collecting real history: ${analysisHistory.length}/50 results available. No fabricated results used.` };
+        }
         const currentIssue = String(analysisHistory[0]?.issueNumber ?? analysisHistory[0]?.issue ?? analysisHistory[0]?.period ?? '');
         const cache = state.deathAnalysisCache;
         let signal = null;
