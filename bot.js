@@ -639,14 +639,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 //  CONFIG
 // ============================================================
 // Keep secrets outside the source code.
-
-
 const BOT_TOKEN    = process.env.BOT_TOKEN || "8817211362:AAHLJ-ftrZpZm08Mamx6bZ-biw9ZoIGROv0";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
-
-
 const REG_LINK     = "https://www.ts777.co";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
@@ -1742,6 +1738,136 @@ function analyzeLuciferNumberToSizeHistory(historyList, currentRow) {
     };
 }
 
+const DEATH_ORDER_BY_DIGIT = Object.freeze({
+    0: [3],
+    1: [5],
+    2: [7],
+    3: [4],
+    4: [4],
+    5: [7],
+    6: [5, 6],
+    7: [7],
+    8: [10, 11],
+    9: [8, 4, 5]
+});
+function hasRepeatedIssueDigits(issue) {
+    const digits = String(issue || '').replace(/\D/g, '');
+    return digits.length >= 2 && new Set(digits).size < digits.length;
+}
+function buildDeathEvents(rows) {
+    const events = [];
+    for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        const previous = events[events.length - 1];
+        // Consecutive identical results are one death, not multiple deaths.
+        if (previous && previous.number === row.number) {
+            previous.count++;
+            previous.positions.push(index + 1);
+            previous.repeated = true;
+            continue;
+        }
+        events.push({
+            number: row.number,
+            index,
+            position: index + 1,
+            positions: [index + 1],
+            issue: row.issue,
+            repeated: hasRepeatedIssueDigits(row.issue),
+            count: 1
+        });
+    }
+    return events;
+}
+function analyzeDeathHistory(historyList, currentRow, previousCache = null) {
+    const rows = (Array.isArray(historyList) ? historyList : [])
+        .slice(0, 50)
+        .map((item, index) => ({
+            number: getResultNumber(item),
+            issue: String(item?.issueNumber ?? item?.issue ?? item?.period ?? index),
+            timestamp: Number(item?.timestamp) || 0
+        }))
+        .filter(row => Number.isInteger(row.number) && row.number >= 0 && row.number <= 9);
+    if (rows.length < 50) return null;
+    const latestNumber = getResultNumber(currentRow) ?? rows[0].number;
+    const events = buildDeathEvents(rows);
+    const positionsByNumber = Array.from({ length: 10 }, () => []);
+    events.forEach(event => positionsByNumber[event.number].push(event));
+    const deathOrders = DEATH_ORDER_BY_DIGIT[latestNumber] || [4];
+    const targetEvents = positionsByNumber[latestNumber] || [];
+    const selectedDeaths = deathOrders
+        .map(order => targetEvents[order - 1])
+        .filter(Boolean);
+    const context = [];
+    const addContext = (event, source, order) => {
+        if (!event) return;
+        // Newest-first history: index-1 is the result that followed this old death.
+        const nextIndex = event.index - 1;
+        const previousIndex = event.index + 1;
+        const candidateIndex = nextIndex >= 0 ? nextIndex : previousIndex < rows.length ? previousIndex : -1;
+        if (candidateIndex < 0) return;
+        const candidate = rows[candidateIndex];
+        context.push({
+            number: candidate.number,
+            size: candidate.number >= 5 ? 'BIG' : 'SMALL',
+            source,
+            deathOrder: order,
+            deathPosition: event.position,
+            issue: candidate.issue
+        });
+    };
+    selectedDeaths.forEach((event, i) => addContext(event, 'DEATH_ORDER', deathOrders[i]));
+    // Include the immediate results around every latest-number occurrence as a
+    // secondary sample, while keeping the configured death-order samples primary.
+    targetEvents.forEach(event => {
+        if (!selectedDeaths.includes(event)) addContext(event, 'LATEST_NUMBER_POSITION', null);
+    });
+    const sizeCounts = { BIG: 0, SMALL: 0 };
+    const numberCounts = Array(10).fill(0);
+    context.forEach(item => {
+        sizeCounts[item.size]++;
+        numberCounts[item.number]++;
+    });
+    // If the configured death positions have no usable neighbour, use the
+    // 50-result window as a measured fallback rather than inventing a signal.
+    if (!context.length) {
+        rows.slice(0, 50).forEach(row => {
+            const size = row.number >= 5 ? 'BIG' : 'SMALL';
+            sizeCounts[size]++;
+            numberCounts[row.number]++;
+        });
+    }
+    const predictedSize = sizeCounts.BIG >= sizeCounts.SMALL ? 'BIG' : 'SMALL';
+    const totalSamples = sizeCounts.BIG + sizeCounts.SMALL;
+    const confidence = totalSamples ? Math.round(Math.max(sizeCounts.BIG, sizeCounts.SMALL) / totalSamples * 100) : 0;
+    const topContextNumbers = numberCounts.map((count, number) => ({ number, count }))
+        .sort((a, b) => b.count - a.count || a.number - b.number)
+        .filter(item => item.count > 0).slice(0, 8).map(item => item.number);
+    return {
+        type: 'SIZE',
+        val: predictedSize,
+        mode: 'DEATH_ANALYSIS',
+        pat: 'DEATH-50-LATEST-NUMBER-POSITIONS',
+        historyBased: true,
+        externalPatternSignal: true,
+        conf: Math.max(1, confidence),
+        latestNumber,
+        historyRows: 50,
+        occurrencePositions: (positionsByNumber[latestNumber] || []).map(event => event.position),
+        deathOrders,
+        selectedDeathPositions: selectedDeaths.map(event => event.position),
+        selectedDeathCount: selectedDeaths.length,
+        repeatedDeaths: events.filter(event => event.repeated).map(event => ({ number: event.number, position: event.position, count: event.count })),
+        contextResults: context,
+        contextNumbers: topContextNumbers,
+        bigCount: sizeCounts.BIG,
+        smallCount: sizeCounts.SMALL,
+        analysisSamples: totalSamples,
+        refreshEveryPeriods: 10,
+        sourceIssue: String(rows[0].issue || ''),
+        decisionReason: `DEATH ANALYSIS: latest ${latestNumber}; positions [${(positionsByNumber[latestNumber] || []).map(event => event.position).join(',') || '-'}]; death orders [${deathOrders.join(',')}]; selected [${selectedDeaths.map(event => event.position).join(',') || '-'}]; context BIG=${sizeCounts.BIG}, SMALL=${sizeCounts.SMALL} -> ${predictedSize}`,
+        bets: [{ type: 'SIZE', val: predictedSize, kind: 'size' }]
+    };
+}
 function buildBestEightLuciferSignal(historyList, currentRow, mode) {
     const base = analyzeLuciferNumberToSizeHistory(historyList, currentRow);
     if (!base || !Array.isArray(base.bestEightNumbers) || base.bestEightNumbers.length === 0) return null;
@@ -3726,19 +3852,45 @@ async function decidePrediction(list, currentLevel, userId) {
     initState(userId);
     const state = userStates[userId];
     const cfg = autobetCfg[userId] || {};
-    if (cfg.mode === 'SIZE' || cfg.mode === 'NUMBER') {
-        if (cfg.mode === 'SIZE' && state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
+    if (cfg.mode === 'SIZE') {
         state.mode = 'NORMAL';
-        state.activeChannel = cfg.mode;
-        state.activeSixChannel = cfg.mode;
-        state.nextPredictionMode = cfg.mode === 'SIZE' ? state.sizePredictionMode : 'NUMBER';
+        state.activeChannel = 'SIZE';
+        state.activeSixChannel = 'SIZE';
+        state.nextPredictionMode = 'DEATH_ANALYSIS';
+        const oldHistory = await fetchLuciferOldHistoryForAnalysis();
+        const analysisHistory = oldHistory.length >= 50 ? oldHistory : list;
+        const currentIssue = String(analysisHistory[0]?.issueNumber ?? analysisHistory[0]?.issue ?? analysisHistory[0]?.period ?? '');
+        const cache = state.deathAnalysisCache;
+        let signal = null;
+        const issueDiff = cache && /^\d+$/.test(currentIssue) && /^\d+$/.test(String(cache.sourceIssue || ''))
+            ? Number(BigInt(currentIssue) - BigInt(cache.sourceIssue)) : 10;
+        const cacheUsable = cache && cache.signal && issueDiff >= 0 && issueDiff < 10;
+        if (cacheUsable) {
+            signal = { ...cache.signal, reused: true, holdPeriods: Number(cache.holdPeriods || 0) };
+            if (Number(cache.holdPeriods || 0) > 0) cache.holdPeriods = Math.max(0, Number(cache.holdPeriods) - 1);
+        } else {
+            signal = analyzeDeathHistory(analysisHistory, analysisHistory[0], cache);
+            if (signal) state.deathAnalysisCache = { signal, sourceIssue: signal.sourceIssue, holdPeriods: 0 };
+        }
+        if (signal) {
+            state.lastPredictionChannel = 'SIZE';
+            state.lastPredictionMode = 'DEATH_ANALYSIS';
+            state.lastPredictionValue = signal.val;
+        }
+        return signal;
+    }
+    if (cfg.mode === 'NUMBER') {
+        if (state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
+        state.mode = 'NORMAL';
+        state.activeChannel = 'NUMBER';
+        state.activeSixChannel = 'NUMBER';
+        state.nextPredictionMode = 'NUMBER';
         const oldHistory = await fetchLuciferOldHistoryForAnalysis();
         const analysisHistory = oldHistory.length >= 4 ? oldHistory : list;
         const signal = buildBestEightLuciferSignal(analysisHistory, analysisHistory[0] || list[0], cfg.mode);
         if (signal) {
-            state.lastPredictionChannel = cfg.mode;
+            state.lastPredictionChannel = 'NUMBER';
             state.lastPredictionMode = signal.mode;
-            state.sizePredictionMode = signal.mode;
             state.lastPredictionValue = signal.val;
         }
         return signal;
@@ -3866,44 +4018,35 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     //   Any RECOVERY WIN -> same channel NORMAL
     //   NORMAL WIN -> remain on the same channel/mode.
     if (st && cfg.enabled && cfg.mode === 'SIZE') {
-        // Big/Small mode: NORMAL is analysis; a NORMAL loss switches to
-        // OPPOSITE. An OPPOSITE win stays OPPOSITE; an OPPOSITE loss returns
-        // to the normal two-result analysis mode.
-        const modeBefore = state.lastPredictionMode === 'OPPOSITE' || state.sizePredictionMode === 'OPPOSITE' ? 'OPPOSITE' : 'ANALYSIS';
+        // Death Analysis mode: keep one analysis result for three periods after
+        // a loss; on the third consecutive loss, clear it and re-analyse the
+        // latest 50-result window on the next prediction.
         state.activeChannel = 'SIZE';
+        state.activeSixChannel = 'SIZE';
+        state.mode = 'NORMAL';
+        state.nextPredictionMode = 'DEATH_ANALYSIS';
         st.waitingForWatchWin = false;
-        if (modeBefore === 'OPPOSITE') {
-            if (wasWin) {
-                state.mode = 'NORMAL';
-                state.sizePredictionMode = 'OPPOSITE';
-                st.lastOutcome = 'OPPOSITE_WIN_STAY_OPPOSITE';
-            } else {
-                state.mode = 'NORMAL';
-                state.sizePredictionMode = 'ANALYSIS';
-                st.lastOutcome = 'OPPOSITE_LOSS_TO_ANALYSIS';
-            }
-        } else if (wasWin) {
-            state.mode = 'NORMAL';
-            state.sizePredictionMode = 'ANALYSIS';
-            st.lastOutcome = 'ANALYSIS_WIN_STAY_ANALYSIS';
-        } else {
-            state.mode = 'NORMAL';
-            state.sizePredictionMode = 'OPPOSITE';
-            st.lastOutcome = 'ANALYSIS_LOSS_TO_OPPOSITE';
-        }
         if (wasWin) {
             st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
             st.inMart = false; st.consecutiveLoss = 0;
-            st.waitingForWatchWin = false;
             st.watchWinStreak = 0;
+            st.lastOutcome = 'DEATH_ANALYSIS_WIN_RESET';
+            state.deathAnalysisLosses = 0;
+            if (state.deathAnalysisCache) state.deathAnalysisCache.holdPeriods = 0;
         } else {
-            const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
-            const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
-            st.level = level >= maxLevel ? 1 : level + 1;
+            st.level = Math.min(Math.max(1, Number(cfg.maxLvl) || 1), Number(st.level || 1) + 1);
             st.sizeLevel = st.level; st.numberLevel = st.level;
             st.inMart = st.level > 1;
             st.consecutiveLoss = Number(st.consecutiveLoss || 0) + 1;
-            st.waitingForWatchWin = true;
+            state.deathAnalysisLosses = Number(state.deathAnalysisLosses || 0) + 1;
+            if (state.deathAnalysisLosses >= 3) {
+                state.deathAnalysisLosses = 0;
+                state.deathAnalysisCache = null;
+                st.lastOutcome = 'DEATH_3_LOSSES_REANALYSE_LATEST_50';
+            } else {
+                if (state.deathAnalysisCache) state.deathAnalysisCache.holdPeriods = 3;
+                st.lastOutcome = `DEATH_LOSS_${state.deathAnalysisLosses}_HOLD_3_PERIODS`;
+            }
             st.watchWinStreak = 0;
             recordLossStreakHit(userId);
         }
@@ -4289,9 +4432,8 @@ async function runPredict(userId, chatId) {
     // Preserve the active analysis/opposite state for SIZE and the channel
     // state for COLOR.
     if (cfg.mode === 'SIZE') {
-        if (state.sizePredictionMode !== 'OPPOSITE') state.sizePredictionMode = 'ANALYSIS';
         state.mode = 'NORMAL';
-        state.nextPredictionMode = state.sizePredictionMode;
+        state.nextPredictionMode = 'DEATH_ANALYSIS';
     } else {
         if (cfg.mode === 'COLOR' && state.mode !== 'RECOVERY') state.mode = 'NORMAL';
         state.nextPredictionMode = state.activeChannel || 'COLOR';
@@ -4366,6 +4508,7 @@ async function runPredict(userId, chatId) {
           "║ 🎮 Mode  : "+String(signal.mode || (signal.type === "SIZE" ? state.sizePredictionMode : state.mode) || "NORMAL")+" "+String(signal.type === "SIZE" ? "BIG/SMALL" : (signal.channel || state.activeChannel || "COLOR"))+"\n"+
           "║ Mode    : "+String(signal.mode || signal.pat || "NORMAL")+"\n"+
           "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
+          (cfg.mode === "SIZE" && signal.deathAnalysis !== false ? "║ Death    : "+String(signal.decisionReason || "50-result death analysis")+"\n" : "")+
           "║ Number  : "+String(signal.number ?? "-")+"\n"+
           "║ Best 8  : "+String(signal.bestEightNumbers?.join(",") ?? "-")+"\n"+
           "║ Count   : S"+String(signal.smallCount ?? "-")+" / B"+String(signal.bigCount ?? "-")+"\n"+
