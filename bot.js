@@ -4337,10 +4337,30 @@ async function sendResultAmountLine(chatId, userId, label, amount, settlement = 
         `Total Loss: -₹${totalLoss.toFixed(2)}`);
     delete pt.activeBetSnapshot;
 }
+async function sendAutoBetHistory(chatId, userId, actualSize, actualNumber, win, settlement, bets) {
+    const cfg = autobetCfg[userId] || {};
+    const pt = profitTrack[userId] || {};
+    const color = getActualColorBase(actualNumber);
+    const stake = settlement ? Number(settlement.totalStake || 0) : (bets || []).reduce((sum, bet) => sum + Number(bet.amt || 0), 0);
+    const payout = settlement ? Number(settlement.payout || 0) : 0;
+    const net = settlement ? Number(settlement.pnl || 0) : Number(pt.lastPeriodProfit || 0);
+    const predictedColor = (bets || []).find(b => b.type === 'COLOR')?.val || '-';
+    const predictedNumbers = (bets || []).filter(b => b.type === 'NUMBER').map(b => b.val);
+    const nextLevel = Number(autobetState[userId]?.level || 1);
+    const title = win ? '✅ WIN HISTORY' : '❌ LOSS HISTORY';
+    const modeLine = cfg.mode === 'COLOR_NUMBER_2'
+        ? `Color: ${predictedColor} → ${color}\nNumbers: ${predictedNumbers.join(',') || '-'} → ${actualNumber}\nPayout: Color 1.8x | Number 8.8x`
+        : `Result: ${actualSize} / ${color} / ${actualNumber}`;
+    await send(chatId, title + '\n' +
+        `Period: ${String(userStates[userId]?.lastSettledPeriod || '-')}\n` + modeLine + '\n' +
+        `Stake: ₹${stake.toFixed(2)} | Payout: ₹${payout.toFixed(2)}\n` +
+        `Net P&L: ${net >= 0 ? '+' : '-'}₹${Math.abs(net).toFixed(2)}\n` +
+        `Next Level: L${nextLevel}`);
+}
 // ============================================================
 // 2. handleWin - UI & Stats
 // ============================================================
-async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settlement = null) {
+async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settlement = null, silent = false) {
     const pt = profitTrack[userId];
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
     let profit;
@@ -4362,7 +4382,7 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
         if (plan?.enabled && switchStep > 0) {
             plan.nextProfitSwitch = (Math.floor(pt.pnl / switchStep) + 1) * switchStep;
         }
-        if (plan?.enabled) {
+        if (plan?.enabled && !silent) {
             const currentLevel = Number(plan.currentLevel) || 1;
             const sizePlan = (autobetCfg[userId].customSizeBets || []).slice(0, autobetCfg[userId].maxLvl).join(" → ₹");
             const numberPlan = (autobetCfg[userId].customNumberBets || []).slice(0, autobetCfg[userId].maxLvl).join(" → ₹");
@@ -4374,14 +4394,18 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
         }
     }
 
-    await sendSticker(chatId, WIN_STICKER);
-    await sendResultAmountLine(chatId, userId, "Profit", profit, settlement);
+    if (!silent) {
+        await sendSticker(chatId, WIN_STICKER);
+        await sendResultAmountLine(chatId, userId, "Profit", profit, settlement);
+    } else {
+        delete pt.activeBetSnapshot;
+    }
 }
 
 // ============================================================
 // 3. handleLoss - UI & Stats
 // ============================================================
-async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], settlement = null) {
+async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], settlement = null, silent = false) {
     const st = autobetState[userId];
     const pt = profitTrack[userId];
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
@@ -4400,8 +4424,12 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
         await runWithTimeout(refreshWalletPlan(userId, "loss"), 8000, false);
     }
 
-    await sendSticker(chatId, LOSS_STICKER);
-    await sendResultAmountLine(chatId, userId, "Loss", amt, settlement);
+    if (!silent) {
+        await sendSticker(chatId, LOSS_STICKER);
+        await sendResultAmountLine(chatId, userId, "Loss", amt, settlement);
+    } else {
+        delete pt.activeBetSnapshot;
+    }
 }
 
 // ============================================================
@@ -4794,7 +4822,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             ? Number(b.val) === num
             : b.type === "COLOR" ? String(b.val).toUpperCase() === actualColor
             : b.type === "SIZE" && b.val === actualSize);
-        if (cfg.mode === "COMBINED" || (cfg.mode === "COLOR_NUMBER" || cfg.mode === "COLOR_NUMBER_2")) {
+        if (!cfg.enabled && (cfg.mode === "COMBINED" || (cfg.mode === "COLOR_NUMBER" || cfg.mode === "COLOR_NUMBER_2"))) {
             const predictedSize = evaluationBets.find(b => b.type === "SIZE")?.val || "-";
             const predictedColor = evaluationBets.find(b => b.type === "COLOR")?.val || "-";
             const predictedNumbers = evaluationBets.filter(b => b.type === "NUMBER").map(b => b.val);
@@ -4882,6 +4910,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         if (combinedResult && betPlaced) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
         else updateAfterResult(userId, win, actualSize, betPlaced);
 
+        userStates[userId].lastSettledPeriod = String(target);
         const s = stats[userId];
         if (betPlaced) {
             if (combinedResult) {
@@ -4902,26 +4931,26 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
 
         if (betPlaced) {
             if (win && settlement) {
-                await handleWin(userId, chatId, actualSize, num, betLevel, bets, settlement);
+                await handleWin(userId, chatId, actualSize, num, betLevel, bets, settlement, cfg.enabled);
             } else if (win) {
-                await handleWin(userId, chatId, actualSize, num, betLevel, bets);
+                await handleWin(userId, chatId, actualSize, num, betLevel, bets, null, cfg.enabled);
             } else if (settlement) {
-                await handleLoss(userId, chatId, actualSize, num, betLevel, bets, settlement);
+                await handleLoss(userId, chatId, actualSize, num, betLevel, bets, settlement, cfg.enabled);
             } else {
-                await handleLoss(userId, chatId, actualSize, num, betLevel, bets);
+                await handleLoss(userId, chatId, actualSize, num, betLevel, bets, null, cfg.enabled);
             }
 
+            if (cfg.enabled) await sendAutoBetHistory(chatId, userId, actualSize, num, win, settlement, bets);
             const targetProfit = Number(cfg.targetProfit) || 1000;
             if (pt.pnl >= targetProfit) {
                 st.isWaiting = true;
                 st.nextStartTime = Date.now() + (Number(cfg.restartDelay) || 1) * 60 * 1000;
-                await send(chatId, "🎯 TARGET REACHED! Bot Paused.");
+                if (!cfg.enabled) await send(chatId, "🎯 TARGET REACHED! Bot Paused.");
             }
         } else {
-            if (win) {
-                await sendSticker(chatId, WIN_STICKER);
-            } else {
-                await sendSticker(chatId, LOSS_STICKER);
+            if (!cfg.enabled) {
+                if (win) await sendSticker(chatId, WIN_STICKER);
+                else await sendSticker(chatId, LOSS_STICKER);
             }
         }
 
