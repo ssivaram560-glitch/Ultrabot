@@ -701,7 +701,8 @@ const CHROME_ARGS = [
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
 const SIZE_WIN_MULTIPLIER = 1.98;   // Gross return for a BIG/SMALL win
-const NUMBER_WIN_MULTIPLIER = 8;    // Gross return for an exact-number win
+const COLOR_WIN_MULTIPLIER = 1.8;  // Gross return for a color win
+const NUMBER_WIN_MULTIPLIER = 8.8;  // Gross return for an exact-number win
 
 // ============================================================
 //  RENDER KEEP-ALIVE
@@ -2207,6 +2208,39 @@ async function getLiveBalance(userId, chatId = null) {
     }
 }
 
+function getColor2SixLevelChart(base = 1) {
+    const b = Math.max(1, Math.floor(Number(base) || 1));
+    return {
+        color: [4, 16, 64, 256, 1024, 4096].map(v => v * b),
+        number: [1, 4, 16, 64, 256, 1024].map(v => v * b),
+        levels: 6,
+        rule: 'Color stake + 2 × Number stake; Color 1.8x; each Number 8.8x'
+    };
+}
+function formatColor2Chart(chart) {
+    return 'L1-L6 Color: ₹' + chart.color.join(' → ₹') +
+        '\nL1-L6 Each Number: ₹' + chart.number.join(' → ₹') +
+        '\nTotal stake: ₹' + chart.color.map((value, i) => value + (chart.number[i] * 2)).join(' → ₹');
+}
+function createColor2WalletPlan(walletBalance, levels) {
+    const totals = generateLevelTotals(Math.floor(Number(walletBalance) || 0), levels);
+    if (!totals || totals.some(total => total < 6)) return [];
+    return totals.map((total, index) => {
+        const eachNumber = Math.max(1, Math.floor(total / 6));
+        const color = total - (eachNumber * 2);
+        return { level: index + 1, color, number: eachNumber, total };
+    });
+}
+function formatColor2WalletPlan(rows) {
+    return rows.map(row => `L${row.level}: Color ₹${row.color} | Each Number ₹${row.number} | Total ₹${row.total}`).join('\n');
+}
+function runWithTimeout(promise, timeoutMs, fallback = false) {
+    const timeout = Math.max(1000, Number(timeoutMs) || 8000);
+    return Promise.race([
+        Promise.resolve(promise),
+        new Promise(resolve => setTimeout(() => resolve(fallback), timeout))
+    ]);
+}
 function initUser(id) {
     userLastSeen[id] = Date.now();
     if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0,levelWins:{},sizeLevelWins:{},numberLevelWins:{} };
@@ -2845,9 +2879,14 @@ function syncProfitPlan(userId, reason = "balance", planBalance = null, maxLevel
     if (configuredBalance <= 0 || !Number.isInteger(levels) || levels <= 0 || levels > 10 || configuredBalance < levels) return false;
 
     const startLevel = Math.max(1, Math.min(levels, Number(plan.startLevel) || 1));
-    const walletPlan = createWalletPlan(Math.max(0, configuredBalance), levels);
+    const isColor2Plan = cfg.mode === "COLOR_NUMBER_2";
+    if (isColor2Plan && configuredBalance < levels * 6) return false;
+    const walletPlan = isColor2Plan
+        ? createColor2WalletPlan(Math.max(0, configuredBalance), levels)
+        : createWalletPlan(Math.max(0, configuredBalance), levels);
+    if (!walletPlan.length) return false;
     const totals = walletPlan.map(row => row.total);
-    const sizeBets = walletPlan.map(row => row.bs);
+    const sizeBets = isColor2Plan ? walletPlan.map(row => row.color) : walletPlan.map(row => row.bs);
     const numberBets = walletPlan.map(row => row.number);
 
     plan.currentLevel = startLevel;
@@ -2858,6 +2897,7 @@ function syncProfitPlan(userId, reason = "balance", planBalance = null, maxLevel
     plan.levels = walletPlan;
     cfg.customBets = cfg.mode === "NUMBER" ? [...numberBets] : cfg.mode === "COMBINED" ? [...totals] : [...sizeBets];
     cfg.customSizeBets = sizeBets;
+    cfg.customColorBets = isColor2Plan ? [...sizeBets] : (cfg.mode === "COLOR" || cfg.mode === "COLOR_NUMBER" ? [...sizeBets] : cfg.customColorBets);
     cfg.customNumberBets = numberBets;
     cfg.maxLvl = walletPlan.length;
 
@@ -2921,7 +2961,7 @@ function calculateSettlement(bets, actualSize, actualNumber) {
             payout += amount * NUMBER_WIN_MULTIPLIER;
             reasons.push("NUMBER");
         } else if (bet.type === "COLOR") {
-            payout += amount * SIZE_WIN_MULTIPLIER;
+            payout += amount * COLOR_WIN_MULTIPLIER;
             reasons.push("COLOR");
         }
     }
@@ -4318,7 +4358,7 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
     const shouldSwitchPlan = plan?.enabled && switchStep > 0 && pt.pnl >= Number(plan.nextProfitSwitch || switchStep);
     if (shouldSwitchPlan) {
         const previousLevel = Number(plan?.currentLevel) || 1;
-        await refreshWalletPlan(userId, "win");
+        await runWithTimeout(refreshWalletPlan(userId, "win"), 8000, false);
         if (plan?.enabled && switchStep > 0) {
             plan.nextProfitSwitch = (Math.floor(pt.pnl / switchStep) + 1) * switchStep;
         }
@@ -4357,7 +4397,7 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
 
     const plan = autobetCfg[userId].profitPlan;
     if (plan?.enabled && plan?.profitSwitchStep > 0 && pt.pnl <= 0) {
-        await refreshWalletPlan(userId, "loss");
+        await runWithTimeout(refreshWalletPlan(userId, "loss"), 8000, false);
     }
 
     await sendSticker(chatId, LOSS_STICKER);
@@ -4767,7 +4807,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
                 `Period: ${target}\n` +
                 ((cfg.mode === "COLOR_NUMBER" || cfg.mode === "COLOR_NUMBER_2")
                     ? `Color: ${predictedColor} → ${actualColor} (${colorStatus})\n` +
-                      `Numbers: ${predictedNumbers.join(",") || "-"} → ${num} (${numberStatus})\n`
+                      `Numbers: ${predictedNumbers.join(",") || "-"} → ${num} (${numberStatus})\n` +
+                      (cfg.mode === "COLOR_NUMBER_2" ? `Payout: Color 1.8x | Number 8.8x | Either win = profit\n` : "")
                     : `Size: ${predictedSize} → ${actualSize} (${sizeStatus})\n` +
                       `Number: ${predictedNumber ?? "-"} → ${num} (${numberStatus})\n`) +
                 `Overall: ${win ? "WIN ✅" : "LOSS ❌"}`
@@ -4893,6 +4934,9 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         userStates[userId].resultHistory = predictionHistory.slice(0, 100);
 
         scheduleRun(userId, chatId, 1500);
+        // Safety net: winnings/loss messaging or wallet refresh must never leave
+        // the prediction loop stopped after settlement.
+        if (running[userId] && !autobetState[userId]?.isWaiting) scheduleRun(userId, chatId, 2500);
         } catch (error) {
             const settled = settledPeriods.get(timerKey);
             settled?.delete(String(target));
@@ -5556,7 +5600,12 @@ formatMartingale(cfg)+"\n\n"+
         if(text==="🎨 Mode: Color+2 Numbers"){
             delete userAction[id];
             autobetCfg[id].mode="COLOR_NUMBER_2";
-            return send(id,"✅ Mode set: COLOR + 2 NUMBERS\nColor uses formula calculation.\nNumbers use opposite-color Lucifer 30sec history analysis (pattern + trend + timing).",{reply_markup:autobetMenu});
+            const chart = getColor2SixLevelChart(autobetCfg[id].baseBet);
+            autobetCfg[id].customColorBets = chart.color;
+            autobetCfg[id].customNumberBets = chart.number;
+            autobetCfg[id].maxLvl = chart.levels;
+            return send(id,"✅ Mode set: COLOR + 2 NUMBERS\n\n" + formatColor2Chart(chart) +
+                "\n\nPayout: Color 1.8x | Any one of 2 Numbers 8.8x\nEither Color or Number win = PROFIT\nColor uses formula; numbers use opposite-color history analysis.",{reply_markup:autobetMenu});
         }
         if(text==="🔢 Mode: Number"){
             delete userAction[id];
@@ -5585,7 +5634,9 @@ formatMartingale(cfg)+"\n\n"+
             }
             if ((autobetCfg[id].mode === "COLOR_NUMBER" || autobetCfg[id].mode === "COLOR_NUMBER_2")) {
                 userAction[id]={action:"setcolornumbercustom",step:"color"};
-                return send(id,"Enter COLOR level amounts first (example: 1,2,4,8):");
+                return send(id, autobetCfg[id].mode === "COLOR_NUMBER_2"
+                    ? "Enter COLOR fund for exactly 6 levels (example: 4,16,64,256,1024,4096):"
+                    : "Enter COLOR level amounts first (example: 1,2,4,8):");
             }
             userAction[id]={action:"setsinglecustom",mode:autobetCfg[id].mode};
             return send(id, autobetCfg[id].mode === "NUMBER" ? "Enter NUMBER bet level amounts (example: 1,9,81,729):" : (autobetCfg[id].mode === "COLOR" || autobetCfg[id].mode === "COLOR_NUMBER") ? "Enter COLOR bet level amounts (example: 1,2,4,8):" : "Enter BIG/SMALL bet level amounts (example: 1,2,4,8):");
@@ -5608,8 +5659,10 @@ if(text==="🔢 Set Watch Losses"){
                 const balance = await getLiveBalance(id);
                 if (!balance.success) return send(id, "❌ Could not fetch wallet balance: " + balance.message);
                 const planBalance = Math.floor(Number(balance.balance));
-                if (!Number.isFinite(planBalance) || planBalance <= 0 || planBalance < maxLevel) {
-                    return send(id, "❌ Actual wallet balance ₹" + (Number.isFinite(planBalance) ? planBalance : 0) + " is too low for " + maxLevel + " levels.");
+                const minimumPlanBalance = autobetCfg[id].mode === "COLOR_NUMBER_2" ? maxLevel * 6 : maxLevel;
+                if (!Number.isFinite(planBalance) || planBalance <= 0 || planBalance < minimumPlanBalance) {
+                    return send(id, "❌ Actual wallet balance ₹" + (Number.isFinite(planBalance) ? planBalance : 0) + " is too low for " + maxLevel + " levels. " +
+                        (autobetCfg[id].mode === "COLOR_NUMBER_2" ? "Color+2 needs at least ₹" + minimumPlanBalance + " (6 × L" + maxLevel + ")." : ""));
                 }
                 if (!autobetCfg[id].profitPlan) autobetCfg[id].profitPlan = { enabled: false, startLevel: 1, currentLevel: 1 };
                 autobetCfg[id].profitPlan.enabled = true;
@@ -5618,9 +5671,14 @@ if(text==="🔢 Set Watch Losses"){
                 autobetCfg[id].profitPlan.planBalance = planBalance;
                 autobetCfg[id].profitPlan.maxLevel = maxLevel;
                 autobetCfg[id].maxLvl = maxLevel;
-                syncProfitPlan(id, "enable", planBalance, maxLevel);
+                const synced = syncProfitPlan(id, "enable", planBalance, maxLevel);
+                if (!synced) return send(id, "❌ Could not build the requested wallet plan. Check balance and level count.");
                 delete userAction[id];
-                return send(id, "✅ Profit plan ON\nActual balance: ₹" + planBalance.toFixed(2) + "\nMax level: L" + maxLevel, {reply_markup: autobetMenu});
+                const planText = autobetCfg[id].mode === "COLOR_NUMBER_2"
+                    ? "\n\n" + formatColor2WalletPlan(autobetCfg[id].profitPlan.levels) +
+                      "\n\nPayout: Color 1.8x | Any one Number 8.8x | Either win = profit"
+                    : "";
+                return send(id, "✅ Profit plan ON\nActual balance: ₹" + planBalance.toFixed(2) + "\nMax level: L" + maxLevel + planText, {reply_markup: autobetMenu});
             }
             else if(s.action === "setprofitswitch"){
                 const step = Number(text.trim().replace(/^\//, ""));
@@ -5663,10 +5721,14 @@ if(text==="🔢 Set Watch Losses"){
                 if (s.step === "color") {
                     autobetCfg[id].customColorBets = vals;
                     userAction[id] = {action:"setcolornumbercustom", step:"number", colorVals:vals};
-                    return send(id,"✅ Color levels saved. Now enter NUMBER level amounts (example: 1,2,4,8):");
+                    return send(id, "✅ Color levels saved. Now enter NUMBER fund for " +
+                        (autobetCfg[id].mode === "COLOR_NUMBER_2" ? "exactly 6 levels, per number (example: 1,4,16,64,256,1024):" : "each level (example: 1,2,4,8):"));
+                }
+                if (autobetCfg[id].mode === "COLOR_NUMBER_2" && ((s.colorVals || []).length !== 6 || vals.length !== 6)) {
+                    return send(id, "❌ COLOR+2 NUMBERS requires exactly 6 Color values and 6 Number values.");
                 }
                 autobetCfg[id].customNumberBets = vals;
-                autobetCfg[id].maxLvl = Math.max((s.colorVals || []).length, vals.length);
+                autobetCfg[id].maxLvl = autobetCfg[id].mode === "COLOR_NUMBER_2" ? 6 : Math.max((s.colorVals || []).length, vals.length);
                 delete userAction[id];
                 return send(id,"✅ Color + Number custom bets updated!\nColor: ₹"+autobetCfg[id].customColorBets.join(" → ₹")+"\nNumbers: ₹"+vals.join(" → ₹"), {reply_markup: autobetMenu});
             }
